@@ -24,14 +24,14 @@ jobs:
           $manifest = Get-Content $manifestPath -Raw | ConvertFrom-Json
           if ($manifest.product -ne 'Syntex Launcher') { throw 'Unexpected product in public manifest.' }
           if ($manifest.channel -ne 'stable') { throw 'Unexpected release channel.' }
-          if ($manifest.version -ne '0.16.5') { throw "Unexpected version: $($manifest.version)" }
+          if ($manifest.version -ne '0.16.6') { throw "Unexpected version: $($manifest.version)" }
           if ($manifest.runtimeIdentifier -ne 'win-x64') { throw 'Unexpected runtime identifier.' }
           if ($manifest.minimumWindowsBuild -ne 17763) { throw 'Unexpected minimum Windows build.' }
           if (-not ([string]$manifest.payload.url).StartsWith('https://')) { throw 'Payload URL is not HTTPS.' }
-          if ($manifest.payload.sha256 -ne 'a219a352bdbdc19ad0464de77214fadb6fc219e1a883fee8dfa88e3ba5078570') { throw 'Unexpected payload SHA-256 in manifest.' }
-          if ([int64]$manifest.payload.size -ne 94901188) { throw 'Unexpected payload size in manifest.' }
+          if ($manifest.payload.sha256 -ne '78870eca0ce18e16010b014d1e5f4a7c7a5a6d633bb94a62327fb3e23db7c743') { throw 'Unexpected payload SHA-256 in manifest.' }
+          if ([int64]$manifest.payload.size -ne 69903914) { throw 'Unexpected payload size in manifest.' }
 
-          $payload = Join-Path $env:RUNNER_TEMP 'SyntexLauncher-0.16.5-win-x64.zip'
+          $payload = Join-Path $env:RUNNER_TEMP 'SyntexLauncher-0.16.6-win-x64.zip'
           Invoke-WebRequest -Uri $manifest.payload.url -OutFile $payload -UseBasicParsing
           if ((Get-Item $payload).Length -ne [int64]$manifest.payload.size) { throw 'Downloaded payload size does not match manifest.' }
           $payloadHash = (Get-FileHash $payload -Algorithm SHA256).Hash.ToLowerInvariant()
@@ -42,12 +42,12 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $setupUrl = 'https://github.com/Silverrain2004/SyntexLauncher-Distribution/releases/download/v0.16.5/SyntexLauncherSetup.exe'
-          $setup = Join-Path $env:RUNNER_TEMP 'SyntexLauncherSetup.exe'
+          $setupUrl = 'https://github.com/Silverrain2004/SyntexLauncher-Distribution/releases/download/v0.16.6/SyntexLauncherSetup-0.16.6-win-x64.exe'
+          $setup = Join-Path $env:RUNNER_TEMP 'SyntexLauncherSetup-0.16.6-win-x64.exe'
           Invoke-WebRequest -Uri $setupUrl -OutFile $setup -UseBasicParsing
-          if ((Get-Item $setup).Length -ne 358400) { throw "Unexpected public setup size: $((Get-Item $setup).Length)" }
+          if ((Get-Item $setup).Length -ne 331776) { throw "Unexpected public setup size: $((Get-Item $setup).Length)" }
           $setupHash = (Get-FileHash $setup -Algorithm SHA256).Hash.ToLowerInvariant()
-          if ($setupHash -ne '357a0930ff5f6d9ee7fa99bfe44ca91a7f6ec3b43ba71ff5efbe84488d5b7eca') { throw "Public setup SHA-256 mismatch: $setupHash" }
+          if ($setupHash -ne '1d3dc6b4e95408ff6e0caf6c49b706ff2ed35d87c00bb62e85a2ffb882b1cc32') { throw "Public setup SHA-256 mismatch: $setupHash" }
 
           $bytes = [IO.File]::ReadAllBytes($setup)
           if ($bytes[0] -ne 0x4D -or $bytes[1] -ne 0x5A) { throw 'Public setup is not a PE executable.' }
@@ -64,8 +64,25 @@ jobs:
               if ($p.HasExited) { throw "Public setup exited before opening a window: $($p.ExitCode)" }
             } while ($p.MainWindowHandle -eq [IntPtr]::Zero -and [DateTime]::UtcNow -lt $deadline)
             if ($p.MainWindowHandle -eq [IntPtr]::Zero) { throw 'Public setup did not open a native Windows window within 15 seconds.' }
-            Write-Host "PUBLIC SETUP PASS · 358400 bytes · x64 · SHA256 $setupHash · HWND $($p.MainWindowHandle)"
+            Write-Host "PUBLIC SETUP PASS · 331776 bytes · x64 · SHA256 $setupHash · HWND $($p.MainWindowHandle)"
           }
           finally {
             if (-not $p.HasExited) { Stop-Process -Id $p.Id -Force }
           }
+
+      - name: Full public install and managed GUI startup
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $setup = Join-Path $env:RUNNER_TEMP 'SyntexLauncherSetup-0.16.6-win-x64.exe'
+          $target = Join-Path $env:RUNNER_TEMP 'Syntex-Public-Smoke-0.16.6'
+          Remove-Item $target -Recurse -Force -ErrorAction SilentlyContinue
+          $p = Start-Process -FilePath $setup -ArgumentList @('--ci-install',$target) -PassThru -Wait
+          if ($p.ExitCode -ne 0) {
+            $setupLogs = Join-Path $env:RUNNER_TEMP 'SyntexSetup-Log'
+            if (Test-Path $setupLogs) { Get-ChildItem $setupLogs -File | ForEach-Object { Get-Content $_.FullName -Raw | Out-Host } }
+            $startLogs = Join-Path $target 'storage\logs\launcher-startup'
+            if (Test-Path $startLogs) { Get-ChildItem $startLogs -File | ForEach-Object { Get-Content $_.FullName -Raw | Out-Host } }
+            throw "Public install/start smoke failed: $($p.ExitCode)"
+          }
+          Write-Host 'PUBLIC INSTALL + MANAGED GUI STARTUP PASS.'
