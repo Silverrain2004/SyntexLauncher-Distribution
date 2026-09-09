@@ -1,0 +1,77 @@
+name: Validate Current Syntex 0.16.6
+
+on:
+  push:
+    branches: ['feat/0.16.7-self-update']
+    paths:
+      - '.github/workflows/validate-current-0166.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate-current-stable:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - name: Download and verify current public release assets
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $payloadUrl = 'https://github.com/Silverrain2004/SyntexLauncher-Distribution/releases/download/v0.16.6/SyntexLauncher-0.16.6-win-x64.zip'
+          $setupUrl = 'https://github.com/Silverrain2004/SyntexLauncher-Distribution/releases/download/v0.16.6/SyntexLauncherSetup-0.16.6-win-x64.exe'
+          $payload = Join-Path $env:RUNNER_TEMP 'SyntexLauncher-0.16.6-win-x64.zip'
+          $setup = Join-Path $env:RUNNER_TEMP 'SyntexLauncherSetup-0.16.6-win-x64.exe'
+          Invoke-WebRequest -Uri $payloadUrl -OutFile $payload -UseBasicParsing
+          Invoke-WebRequest -Uri $setupUrl -OutFile $setup -UseBasicParsing
+          $payloadSize = (Get-Item $payload).Length
+          $payloadHash = (Get-FileHash $payload -Algorithm SHA256).Hash.ToLowerInvariant()
+          $setupSize = (Get-Item $setup).Length
+          $setupHash = (Get-FileHash $setup -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($payloadSize -ne 69903997) { throw "Unexpected payload size: $payloadSize" }
+          if ($payloadHash -ne 'f34397dae9ca7986ef5d8f9183c6d4ee355126d2c9b913dea6eee561835ada74') { throw "Unexpected payload SHA256: $payloadHash" }
+          if ($setupSize -ne 331776) { throw "Unexpected setup size: $setupSize" }
+          if ($setupHash -ne '7d785b1b4205ccb9bc59ab630bebd93a9853ba8f4bbf491f8315091e12241c17') { throw "Unexpected setup SHA256: $setupHash" }
+          "PAYLOAD=$payload" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          "SETUP=$setup" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          Write-Host "PUBLIC_0166_ASSETS_VERIFIED payload=$payloadHash setup=$setupHash"
+
+      - name: Verify AMD64 setup and payload layout
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          function Assert-X64([string]$Path) {
+            $bytes = [IO.File]::ReadAllBytes($Path)
+            if ($bytes.Length -lt 512 -or $bytes[0] -ne 0x4D -or $bytes[1] -ne 0x5A) { throw "$Path is not PE." }
+            $pe = [BitConverter]::ToInt32($bytes, 0x3C)
+            $machine = [BitConverter]::ToUInt16($bytes, $pe + 4)
+            if ($machine -ne 0x8664) { throw "$Path is not AMD64: 0x$('{0:X4}' -f $machine)" }
+          }
+          Assert-X64 $env:SETUP
+          $unpack = Join-Path $env:RUNNER_TEMP 'payload-check'
+          Expand-Archive -LiteralPath $env:PAYLOAD -DestinationPath $unpack -Force
+          Assert-X64 (Join-Path $unpack 'SyntexLauncher.exe')
+          if (-not (Test-Path (Join-Path $unpack 'app\SyntexLauncher.App.exe'))) { throw 'Managed apphost missing from payload.' }
+          if (-not (Test-Path (Join-Path $unpack 'app\SyntexUninstall.exe'))) { throw 'Uninstaller missing from payload.' }
+          Write-Host 'PUBLIC_0166_LAYOUT_X64_PASS'
+
+      - name: Full public setup install and launcher startup verification
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $target = Join-Path $env:RUNNER_TEMP 'Syntex-0166-current-validation'
+          Remove-Item $target -Recurse -Force -ErrorAction SilentlyContinue
+          $p = Start-Process -FilePath $env:SETUP -ArgumentList @('--ci-install',$target) -PassThru -Wait
+          if ($p.ExitCode -ne 0) {
+            $setupLogDir = Join-Path (Split-Path $env:SETUP -Parent) 'SyntexSetup-Log'
+            if (Test-Path $setupLogDir) { Get-ChildItem $setupLogDir -File | ForEach-Object { Write-Host "--- $($_.Name) ---"; Get-Content $_.FullName -Raw } }
+            $startupLogs = Join-Path $target 'storage\logs\launcher-startup'
+            if (Test-Path $startupLogs) { Get-ChildItem $startupLogs -File | ForEach-Object { Write-Host "--- $($_.Name) ---"; Get-Content $_.FullName -Raw } }
+            throw "Public 0.16.6 setup/install/start failed: $($p.ExitCode)"
+          }
+          foreach ($required in @('SyntexLauncher.exe','app\SyntexLauncher.App.exe','app\SyntexUninstall.exe')) {
+            if (-not (Test-Path (Join-Path $target $required))) { throw "Installed file missing: $required" }
+          }
+          Get-Process SyntexLauncher -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+          Write-Host 'PUBLIC_0166_INSTALL_START_PASS'
