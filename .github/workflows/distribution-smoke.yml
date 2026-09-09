@@ -1,0 +1,71 @@
+name: Public Distribution Smoke
+
+on:
+  push:
+    paths:
+      - 'distribution.json'
+      - '.github/workflows/distribution-smoke.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows-x64-public-distribution:
+    runs-on: windows-latest
+    steps:
+      - name: Validate public manifest and release payload
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $manifestUrl = 'https://raw.githubusercontent.com/Silverrain2004/SyntexLauncher-Distribution/main/distribution.json'
+          $manifestPath = Join-Path $env:RUNNER_TEMP 'distribution.json'
+          Invoke-WebRequest -Uri $manifestUrl -OutFile $manifestPath -UseBasicParsing
+          $manifest = Get-Content $manifestPath -Raw | ConvertFrom-Json
+          if ($manifest.product -ne 'Syntex Launcher') { throw 'Unexpected product in public manifest.' }
+          if ($manifest.channel -ne 'stable') { throw 'Unexpected release channel.' }
+          if ($manifest.version -ne '0.16.5') { throw "Unexpected version: $($manifest.version)" }
+          if ($manifest.runtimeIdentifier -ne 'win-x64') { throw 'Unexpected runtime identifier.' }
+          if ($manifest.minimumWindowsBuild -ne 17763) { throw 'Unexpected minimum Windows build.' }
+          if (-not ([string]$manifest.payload.url).StartsWith('https://')) { throw 'Payload URL is not HTTPS.' }
+          if ($manifest.payload.sha256 -ne 'a219a352bdbdc19ad0464de77214fadb6fc219e1a883fee8dfa88e3ba5078570') { throw 'Unexpected payload SHA-256 in manifest.' }
+          if ([int64]$manifest.payload.size -ne 94901188) { throw 'Unexpected payload size in manifest.' }
+
+          $payload = Join-Path $env:RUNNER_TEMP 'SyntexLauncher-0.16.5-win-x64.zip'
+          Invoke-WebRequest -Uri $manifest.payload.url -OutFile $payload -UseBasicParsing
+          if ((Get-Item $payload).Length -ne [int64]$manifest.payload.size) { throw 'Downloaded payload size does not match manifest.' }
+          $payloadHash = (Get-FileHash $payload -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($payloadHash -ne $manifest.payload.sha256) { throw "Downloaded payload SHA-256 mismatch: $payloadHash" }
+          Write-Host "PUBLIC PAYLOAD PASS · $((Get-Item $payload).Length) bytes · SHA256 $payloadHash"
+
+      - name: Validate and launch public native setup
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $setupUrl = 'https://github.com/Silverrain2004/SyntexLauncher-Distribution/releases/download/v0.16.5/SyntexLauncherSetup.exe'
+          $setup = Join-Path $env:RUNNER_TEMP 'SyntexLauncherSetup.exe'
+          Invoke-WebRequest -Uri $setupUrl -OutFile $setup -UseBasicParsing
+          if ((Get-Item $setup).Length -ne 358400) { throw "Unexpected public setup size: $((Get-Item $setup).Length)" }
+          $setupHash = (Get-FileHash $setup -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($setupHash -ne '357a0930ff5f6d9ee7fa99bfe44ca91a7f6ec3b43ba71ff5efbe84488d5b7eca') { throw "Public setup SHA-256 mismatch: $setupHash" }
+
+          $bytes = [IO.File]::ReadAllBytes($setup)
+          if ($bytes[0] -ne 0x4D -or $bytes[1] -ne 0x5A) { throw 'Public setup is not a PE executable.' }
+          $pe = [BitConverter]::ToInt32($bytes, 0x3C)
+          $machine = [BitConverter]::ToUInt16($bytes, $pe + 4)
+          if ($machine -ne 0x8664) { throw ("Expected AMD64 PE machine 0x8664, got 0x{0:X4}" -f $machine) }
+
+          $p = Start-Process -FilePath $setup -PassThru
+          try {
+            $deadline = [DateTime]::UtcNow.AddSeconds(15)
+            do {
+              Start-Sleep -Milliseconds 100
+              $p.Refresh()
+              if ($p.HasExited) { throw "Public setup exited before opening a window: $($p.ExitCode)" }
+            } while ($p.MainWindowHandle -eq [IntPtr]::Zero -and [DateTime]::UtcNow -lt $deadline)
+            if ($p.MainWindowHandle -eq [IntPtr]::Zero) { throw 'Public setup did not open a native Windows window within 15 seconds.' }
+            Write-Host "PUBLIC SETUP PASS · 358400 bytes · x64 · SHA256 $setupHash · HWND $($p.MainWindowHandle)"
+          }
+          finally {
+            if (-not $p.HasExited) { Stop-Process -Id $p.Id -Force }
+          }
