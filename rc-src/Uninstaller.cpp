@@ -6,6 +6,8 @@
 #include <string>
 #include <vector>
 
+#pragma comment(lib, "ole32.lib")
+
 namespace fs = std::filesystem;
 static constexpr wchar_t kUninstallKey[] = L"Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\SyntexLauncher";
 
