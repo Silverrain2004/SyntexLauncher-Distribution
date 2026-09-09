@@ -87,14 +87,13 @@ jobs:
           }
 
           function Find-VisibleSyntexWindow {
-            $found = $null
             $callback = [SyntexUi+EnumWindowsProc]{
               param([IntPtr]$hwnd, [IntPtr]$lparam)
               if (-not [SyntexUi]::IsWindowVisible($hwnd)) { return $true }
               [uint32]$pid = 0
               [void][SyntexUi]::GetWindowThreadProcessId($hwnd, [ref]$pid)
               try { $proc = Get-Process -Id $pid -ErrorAction Stop } catch { return $true }
-              if ($proc.ProcessName -notlike 'SyntexLauncher*') { return $true }
+              if ($proc.ProcessName -notlike 'SyntexLauncher*' -or $proc.ProcessName -like '*Setup*') { return $true }
               $title = New-Object Text.StringBuilder 512
               [void][SyntexUi]::GetWindowText($hwnd, $title, $title.Capacity)
               if ($title.Length -gt 0) {
