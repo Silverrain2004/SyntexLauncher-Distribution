@@ -1,0 +1,237 @@
+name: Syntex 0.16.7 Self-Update Smoke
+
+on:
+  push:
+    branches: ['feat/0.16.7-self-update']
+    paths:
+      - 'rc-src/LauncherHost.cpp'
+      - 'rc-src/UpdateAgent.cpp'
+      - 'rc-src/Setup.cpp'
+      - '.github/workflows/0167-self-update-smoke.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  windows-e2e:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/0.16.7-self-update
+          fetch-depth: 0
+
+      - name: Prepare base payload
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $work = Join-Path $env:RUNNER_TEMP 'syntex-0167-update-smoke'
+          $candidate = Join-Path $work 'candidate'
+          $oldRoot = Join-Path $work 'old-root'
+          $dist = Join-Path $work 'dist'
+          New-Item -ItemType Directory -Force -Path $work,$candidate,$oldRoot,$dist | Out-Null
+          $baseZip = Join-Path $work 'base-0.16.6.zip'
+          Invoke-WebRequest -Uri 'https://github.com/Silverrain2004/SyntexLauncher-Distribution/releases/download/v0.16.6/SyntexLauncher-0.16.6-win-x64.zip' -OutFile $baseZip -UseBasicParsing
+          $hash = (Get-FileHash $baseZip -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($hash -ne '78870eca0ce18e16010b014d1e5f4a7c7a5a6d633bb94a62327fb3e23db7c743') { throw "0.16.6 base hash mismatch: $hash" }
+          Expand-Archive -LiteralPath $baseZip -DestinationPath $candidate -Force
+          Expand-Archive -LiteralPath $baseZip -DestinationPath $oldRoot -Force
+          "WORK=$work" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          "CANDIDATE=$candidate" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          "OLD_ROOT=$oldRoot" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          "DIST=$dist" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Locate Visual C++ x64 toolchain
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+          $vs = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if ([string]::IsNullOrWhiteSpace($vs)) { throw 'Visual C++ x64 tools not found.' }
+          $dev = Join-Path $vs 'Common7\Tools\VsDevCmd.bat'
+          "VSDEVCMD=$dev" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Build 0.16.7 native host and update agent
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $cmd = Join-Path $env:RUNNER_TEMP 'build-0167-native.cmd'
+          @(
+            '@echo on',
+            "call `"$env:VSDEVCMD`" -arch=x64 -host_arch=x64",
+            'if errorlevel 1 exit /b %errorlevel%',
+            "cl.exe /nologo /utf-8 /std:c++20 /EHsc /W4 /O1 /Os /GL /MT `"$env:GITHUB_WORKSPACE\rc-src\LauncherHost.cpp`" /Fe:`"$env:CANDIDATE\SyntexLauncher.exe`" /link /SUBSYSTEM:WINDOWS /MACHINE:X64 /LTCG /OPT:REF /OPT:ICF winhttp.lib bcrypt.lib shell32.lib user32.lib",
+            'if errorlevel 1 exit /b %errorlevel%',
+            "cl.exe /nologo /utf-8 /std:c++20 /EHsc /W4 /O1 /Os /GL /MT `"$env:GITHUB_WORKSPACE\rc-src\UpdateAgent.cpp`" /Fe:`"$env:CANDIDATE\app\SyntexUpdateAgent.exe`" /link /SUBSYSTEM:WINDOWS /MACHINE:X64 /LTCG /OPT:REF /OPT:ICF shell32.lib user32.lib",
+            'exit /b %errorlevel%'
+          ) | Set-Content -LiteralPath $cmd -Encoding ascii
+          & cmd.exe /d /c $cmd
+          if ($LASTEXITCODE -ne 0) { throw "Native 0.16.7 build failed: $LASTEXITCODE" }
+          if (-not (Test-Path (Join-Path $env:CANDIDATE 'app\SyntexUpdateAgent.exe'))) { throw 'Update agent missing.' }
+          $hostHash = (Get-FileHash (Join-Path $env:CANDIDATE 'SyntexLauncher.exe') -Algorithm SHA256).Hash.ToLowerInvariant()
+          "NEW_HOST_HASH=$hostHash" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Package temporary 0.16.7 candidate
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $zip = Join-Path $env:DIST 'SyntexLauncher-0.16.7-self-update-smoke.zip'
+          Push-Location $env:CANDIDATE
+          try { & 7z a -tzip -mx=9 -mfb=258 -mpass=15 -y $zip '.\*' | Out-Host } finally { Pop-Location }
+          if ($LASTEXITCODE -ne 0) { throw "7z failed: $LASTEXITCODE" }
+          $zipHash = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLowerInvariant()
+          $zipSize = (Get-Item $zip).Length
+          "ZIP=$zip" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          "ZIP_HASH=$zipHash" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          "ZIP_SIZE=$zipSize" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Publish isolated updater test asset
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          gh release view v0.16.7-self-update-smoke *> $null
+          if ($LASTEXITCODE -eq 0) { gh release delete v0.16.7-self-update-smoke --cleanup-tag -y }
+          gh release create v0.16.7-self-update-smoke $env:ZIP --prerelease --title 'Syntex 0.16.7 self-update smoke' --notes 'Temporary automated self-update validation asset. Not a user release.'
+          if ($LASTEXITCODE -ne 0) { throw "Temporary release creation failed: $LASTEXITCODE" }
+
+      - name: Publish isolated updater test manifest on branch
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          @"
+          {
+            "schemaVersion": 1,
+            "product": "Syntex Launcher",
+            "channel": "ci-self-update",
+            "version": "0.16.7",
+            "runtimeIdentifier": "win-x64",
+            "minimumWindowsBuild": 17763,
+            "payload": {
+              "url": "https://github.com/Silverrain2004/SyntexLauncher-Distribution/releases/download/v0.16.7-self-update-smoke/SyntexLauncher-0.16.7-self-update-smoke.zip",
+              "sha256": "$env:ZIP_HASH",
+              "size": $env:ZIP_SIZE
+            }
+          }
+          "@ | Set-Content -LiteralPath "$env:GITHUB_WORKSPACE\self-update-test.json" -Encoding utf8
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add self-update-test.json
+          if (-not (git diff --cached --quiet)) {
+            git commit -m 'Update isolated 0.16.7 self-update test manifest'
+            git push origin HEAD:feat/0.16.7-self-update
+          }
+
+      - name: Build simulated 0.16.6 host pointed only at isolated test manifest
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $source = Get-Content "$env:GITHUB_WORKSPACE\rc-src\LauncherHost.cpp" -Raw
+          $source = $source.Replace('static constexpr wchar_t kCurrentVersion[] = L"0.16.7";', 'static constexpr wchar_t kCurrentVersion[] = L"0.16.6";')
+          $source = $source.Replace('https://raw.githubusercontent.com/Silverrain2004/SyntexLauncher-Distribution/main/distribution.json', 'https://raw.githubusercontent.com/Silverrain2004/SyntexLauncher-Distribution/feat/0.16.7-self-update/self-update-test.json')
+          $oldSource = Join-Path $env:RUNNER_TEMP 'LauncherHost-0.16.6-test.cpp'
+          Set-Content -LiteralPath $oldSource -Value $source -Encoding utf8
+          $cmd = Join-Path $env:RUNNER_TEMP 'build-old-test-host.cmd'
+          @(
+            '@echo on',
+            "call `"$env:VSDEVCMD`" -arch=x64 -host_arch=x64",
+            'if errorlevel 1 exit /b %errorlevel%',
+            "cl.exe /nologo /utf-8 /std:c++20 /EHsc /W4 /O1 /Os /GL /MT `"$oldSource`" /Fe:`"$env:OLD_ROOT\SyntexLauncher.exe`" /link /SUBSYSTEM:WINDOWS /MACHINE:X64 /LTCG /OPT:REF /OPT:ICF winhttp.lib bcrypt.lib shell32.lib user32.lib",
+            'exit /b %errorlevel%'
+          ) | Set-Content -LiteralPath $cmd -Encoding ascii
+          & cmd.exe /d /c $cmd
+          if ($LASTEXITCODE -ne 0) { throw "Old host build failed: $LASTEXITCODE" }
+          New-Item -ItemType Directory -Force -Path (Join-Path $env:OLD_ROOT 'storage') | Out-Null
+          'DO-NOT-DELETE' | Set-Content -LiteralPath (Join-Path $env:OLD_ROOT 'storage\user-data-preserved.txt') -Encoding ascii
+
+      - name: End-to-end self-update 0.16.6 to 0.16.7
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $oldHost = Join-Path $env:OLD_ROOT 'SyntexLauncher.exe'
+          $p = Start-Process $oldHost -PassThru -Wait
+          if ($p.ExitCode -ne 0) { throw "Old host did not hand update to agent: $($p.ExitCode)" }
+          $deadline = [DateTime]::UtcNow.AddMinutes(3)
+          $success = $false
+          do {
+            Start-Sleep -Milliseconds 500
+            $logs = Join-Path $env:OLD_ROOT 'storage\logs\launcher-update'
+            if (Test-Path $logs) {
+              $match = Get-ChildItem $logs -File -ErrorAction SilentlyContinue | Where-Object { (Get-Content $_.FullName -Raw -ErrorAction SilentlyContinue) -match 'UPDATE_SUCCESS' }
+              if ($match) { $success = $true; break }
+            }
+          } while ([DateTime]::UtcNow -lt $deadline)
+          if (-not $success) {
+            Get-ChildItem (Join-Path $env:OLD_ROOT 'storage\logs') -Recurse -File -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "--- $($_.FullName) ---"; Get-Content $_.FullName -Raw }
+            throw 'Transactional self-update never reached UPDATE_SUCCESS.'
+          }
+          $installedHash = (Get-FileHash (Join-Path $env:OLD_ROOT 'SyntexLauncher.exe') -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($installedHash -ne $env:NEW_HOST_HASH) { throw "Host was not replaced. Expected $env:NEW_HOST_HASH got $installedHash" }
+          if (-not (Test-Path (Join-Path $env:OLD_ROOT 'app\SyntexUpdateAgent.exe'))) { throw 'Update agent was not installed.' }
+          $sentinel = Get-Content (Join-Path $env:OLD_ROOT 'storage\user-data-preserved.txt') -Raw
+          if ($sentinel.Trim() -ne 'DO-NOT-DELETE') { throw 'Personal storage data was modified by self-update.' }
+          Get-Process SyntexLauncher -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+          Write-Host 'SELF_UPDATE_0166_TO_0167_PASS'
+
+      - name: Build 0.16.7 repair Setup against same verified payload
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          @"
+          #pragma once
+          #define PAYLOAD_URL L"https://github.com/Silverrain2004/SyntexLauncher-Distribution/releases/download/v0.16.7-self-update-smoke/SyntexLauncher-0.16.7-self-update-smoke.zip"
+          #define PAYLOAD_SHA256 L"$env:ZIP_HASH"
+          #define PAYLOAD_SIZE $($env:ZIP_SIZE)ULL
+          "@ | Set-Content "$env:GITHUB_WORKSPACE\rc-src\PayloadContract.h" -Encoding utf8
+          $src = Get-Content "$env:GITHUB_WORKSPACE\rc-src\Setup.cpp" -Raw
+          $src = $src.Replace('0.16.6 RC1','0.16.7').Replace('0.16.6-RC1','0.16.7').Replace('0.16.6','0.16.7')
+          $finalSrc = Join-Path $env:RUNNER_TEMP 'Setup-0.16.7.cpp'
+          Set-Content $finalSrc $src -Encoding utf8
+          $setup = Join-Path $env:DIST 'SyntexLauncherSetup-0.16.7-update-smoke.exe'
+          $cmd = Join-Path $env:RUNNER_TEMP 'build-setup-0167.cmd'
+          @(
+            '@echo on',
+            "call `"$env:VSDEVCMD`" -arch=x64 -host_arch=x64",
+            'if errorlevel 1 exit /b %errorlevel%',
+            "cl.exe /nologo /utf-8 /std:c++20 /EHsc /W4 /O1 /Os /GL /MT /I`"$env:GITHUB_WORKSPACE\rc-src`" `"$finalSrc`" /Fe:`"$setup`" /link /SUBSYSTEM:WINDOWS /MACHINE:X64 /LTCG /OPT:REF /OPT:ICF winhttp.lib bcrypt.lib shell32.lib ole32.lib user32.lib gdi32.lib advapi32.lib comctl32.lib uxtheme.lib",
+            'exit /b %errorlevel%'
+          ) | Set-Content $cmd -Encoding ascii
+          & cmd.exe /d /c $cmd
+          if ($LASTEXITCODE -ne 0) { throw "0.16.7 setup build failed: $LASTEXITCODE" }
+          "SETUP=$setup" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Verify Setup repair contract and existing user data preservation
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          foreach ($arg in @('--self-test','--log-self-test','--repair-self-test')) {
+            $p = Start-Process $env:SETUP -ArgumentList $arg -PassThru -Wait
+            if ($p.ExitCode -ne 0) { throw "Setup self-test $arg failed: $($p.ExitCode)" }
+          }
+          $repairRoot = Join-Path $env:WORK 'repair-existing'
+          New-Item -ItemType Directory -Force -Path $repairRoot | Out-Null
+          Expand-Archive -LiteralPath (Join-Path $env:WORK 'base-0.16.6.zip') -DestinationPath $repairRoot -Force
+          New-Item -ItemType Directory -Force -Path (Join-Path $repairRoot 'storage') | Out-Null
+          'PRESERVE-ME' | Set-Content -LiteralPath (Join-Path $repairRoot 'storage\real-user-data.txt') -Encoding ascii
+          'STALE' | Set-Content -LiteralPath (Join-Path $repairRoot 'Old.Managed.dll') -Encoding ascii
+          $p = Start-Process $env:SETUP -ArgumentList @('--ci-install',$repairRoot) -PassThru -Wait
+          if ($p.ExitCode -ne 0) { throw "Setup repair install failed: $($p.ExitCode)" }
+          if (Test-Path (Join-Path $repairRoot 'Old.Managed.dll')) { throw 'Stale root program file survived repair.' }
+          if ((Get-Content (Join-Path $repairRoot 'storage\real-user-data.txt') -Raw).Trim() -ne 'PRESERVE-ME') { throw 'Repair modified personal storage data.' }
+          if (-not (Test-Path (Join-Path $repairRoot 'app\SyntexUpdateAgent.exe'))) { throw 'Repair did not install updater agent.' }
+          $installedHash = (Get-FileHash (Join-Path $repairRoot 'SyntexLauncher.exe') -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($installedHash -ne $env:NEW_HOST_HASH) { throw 'Repair did not install expected 0.16.7 host.' }
+          Get-Process SyntexLauncher -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+          Write-Host 'SETUP_REPAIR_PRESERVES_USER_DATA_PASS'
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: 0.16.7-self-update-repair-smoke
+          path: |
+            ${{ env.SETUP }}
+            ${{ env.ZIP }}
+          if-no-files-found: error
+          retention-days: 7
