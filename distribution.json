@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "product": "Syntex Launcher",
+  "channel": "stable",
+  "version": "0.16.5",
+  "runtimeIdentifier": "win-x64",
+  "minimumWindowsBuild": 17763,
+  "payload": {
+    "url": "",
+    "sha256": "",
+    "size": 0
+  },
+  "languages": {
+    "base": ["de-DE", "en-US"],
+    "remote": []
+  },
+  "publishedUtc": null
+}
