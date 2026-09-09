@@ -2,13 +2,13 @@
   "schemaVersion": 1,
   "product": "Syntex Launcher",
   "channel": "stable",
-  "version": "0.16.5",
+  "version": "0.16.6",
   "runtimeIdentifier": "win-x64",
   "minimumWindowsBuild": 17763,
   "payload": {
-    "url": "https://github.com/Silverrain2004/SyntexLauncher-Distribution/releases/download/v0.16.5/SyntexLauncher-0.16.5-win-x64.zip",
-    "sha256": "a219a352bdbdc19ad0464de77214fadb6fc219e1a883fee8dfa88e3ba5078570",
-    "size": 94901188
+    "url": "https://github.com/Silverrain2004/SyntexLauncher-Distribution/releases/download/v0.16.6/SyntexLauncher-0.16.6-win-x64.zip",
+    "sha256": "78870eca0ce18e16010b014d1e5f4a7c7a5a6d633bb94a62327fb3e23db7c743",
+    "size": 69903914
   },
   "languages": {
     "base": [
@@ -17,5 +17,5 @@
     ],
     "remote": []
   },
-  "publishedUtc": "2026-09-09T13:54:11Z"
+  "publishedUtc": "2026-09-09T18:06:23Z"
 }
