@@ -1,4 +1,4 @@
-name: Runner Check
+name: Published Launcher Smoke
 
 on:
   push:
@@ -13,21 +13,55 @@ jobs:
   windows:
     runs-on: windows-latest
     steps:
-      - name: Check Windows runner
+      - name: Download and verify published 0.16.5 payload
         shell: pwsh
         run: |
-          Write-Host "Windows runner available"
-          [Environment]::OSVersion.VersionString
-      - name: Check cross-repository source access
+          $ErrorActionPreference = 'Stop'
+          $url = 'https://github.com/Silverrain2004/SyntexLauncher-Distribution/releases/download/v0.16.5/SyntexLauncher-0.16.5-win-x64.zip'
+          $zip = Join-Path $env:RUNNER_TEMP 'SyntexLauncher-0.16.5-win-x64.zip'
+          Invoke-WebRequest -Uri $url -OutFile $zip -UseBasicParsing
+          $expected = 'a219a352bdbdc19ad0464de77214fadb6fc219e1a883fee8dfa88e3ba5078570'
+          $actual = (Get-FileHash -Path $zip -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actual -ne $expected) { throw "Payload SHA-256 mismatch: $actual" }
+          Write-Host "Published payload verified: $((Get-Item $zip).Length) bytes"
+      - name: Launch exact published 0.16.5 launcher
         shell: pwsh
-        env:
-          GH_TOKEN: ${{ github.token }}
         run: |
-          $ErrorActionPreference = 'Continue'
-          gh api repos/Silverrain2004/SyntexLauncher/contents/Directory.Build.props --silent
-          if ($LASTEXITCODE -eq 0) {
-            Write-Host 'CROSS_REPO_PRIVATE_READ=YES'
-          } else {
-            Write-Host 'CROSS_REPO_PRIVATE_READ=NO'
+          $ErrorActionPreference = 'Stop'
+          $zip = Join-Path $env:RUNNER_TEMP 'SyntexLauncher-0.16.5-win-x64.zip'
+          $root = Join-Path $env:RUNNER_TEMP 'syntex-published-0.16.5'
+          Remove-Item $root -Recurse -Force -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Path $root -Force | Out-Null
+          Expand-Archive -Path $zip -DestinationPath $root -Force
+          $exe = Join-Path $root 'SyntexLauncher.exe'
+          if (-not (Test-Path $exe -PathType Leaf)) { throw "SyntexLauncher.exe missing after extraction" }
+          $p = Start-Process -FilePath $exe -WorkingDirectory $root -PassThru
+          try {
+            $deadline = [DateTime]::UtcNow.AddSeconds(30)
+            do {
+              Start-Sleep -Milliseconds 250
+              $p.Refresh()
+              if ($p.HasExited) {
+                Write-Host "Launcher exited early with code $($p.ExitCode)"
+                $candidates = @(
+                  (Join-Path $root 'diagnostics\bootstrap-fatal.log'),
+                  (Join-Path $env:LOCALAPPDATA 'SyntexLauncher\diagnostics\bootstrap-fatal.log'),
+                  (Join-Path $env:TEMP 'SyntexLauncher-bootstrap-fatal.log')
+                )
+                foreach ($log in $candidates) {
+                  if (Test-Path $log -PathType Leaf) {
+                    Write-Host "===== $log ====="
+                    Get-Content $log -Raw
+                  }
+                }
+                throw "Published SyntexLauncher 0.16.5 exited before opening its main window. Exit code $($p.ExitCode)"
+              }
+            } while ($p.MainWindowHandle -eq [IntPtr]::Zero -and [DateTime]::UtcNow -lt $deadline)
+            if ($p.MainWindowHandle -eq [IntPtr]::Zero) {
+              throw 'Published SyntexLauncher 0.16.5 did not expose a main window within 30 seconds.'
+            }
+            Write-Host ("PUBLISHED LAUNCHER GUI PASS - HWND 0x{0:X}" -f $p.MainWindowHandle.ToInt64())
           }
-          exit 0
+          finally {
+            if (-not $p.HasExited) { Stop-Process -Id $p.Id -Force }
+          }
