@@ -18,3 +18,16 @@ jobs:
         run: |
           Write-Host "Windows runner available"
           [Environment]::OSVersion.VersionString
+      - name: Check cross-repository source access
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = 'Continue'
+          gh api repos/Silverrain2004/SyntexLauncher/contents/Directory.Build.props --silent
+          if ($LASTEXITCODE -eq 0) {
+            Write-Host 'CROSS_REPO_PRIVATE_READ=YES'
+          } else {
+            Write-Host 'CROSS_REPO_PRIVATE_READ=NO'
+          }
+          exit 0
