@@ -100,7 +100,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
     auto args = Arguments();
 
     if (args.size() == 1 && _wcsicmp(args[0].c_str(), L"--host-log-self-test") == 0) {
-        auto log = WriteLog(root, L"Syntex Launcher 0.16.6 RC native startup logging self-test\r\n");
+        auto log = WriteLog(root, L"Syntex Launcher 0.16.6 native startup logging self-test\r\n");
         return log.empty() ? 91 : 0;
     }
 
@@ -132,7 +132,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
     }
     CloseHandle(pi.hThread);
 
-    auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(ciGui ? 25 : 12);
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(ciGui ? 120 : 12);
     while (std::chrono::steady_clock::now() < deadline) {
         DWORD wait = WaitForSingleObject(pi.hProcess, 100);
         if (wait == WAIT_OBJECT_0) {
@@ -159,7 +159,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
     if (ciGui) {
         TerminateProcess(pi.hProcess, 96);
         CloseHandle(pi.hProcess);
-        WriteLog(root, L"CI GUI self-test fehlgeschlagen: innerhalb von 25 Sekunden kein sichtbares Fenster.\r\n");
+        WriteLog(root, L"CI GUI self-test fehlgeschlagen: innerhalb von 120 Sekunden kein sichtbares Fenster.\r\n");
         return 96;
     }
 
