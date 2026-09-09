@@ -1,0 +1,20 @@
+name: Runner Check
+
+on:
+  push:
+    paths:
+      - '.github/workflows/runner-check.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - name: Check Windows runner
+        shell: pwsh
+        run: |
+          Write-Host "Windows runner available"
+          [Environment]::OSVersion.VersionString
