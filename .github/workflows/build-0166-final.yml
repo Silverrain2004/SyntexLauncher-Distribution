@@ -79,10 +79,10 @@ jobs:
           }
           $logTest = Start-Process -FilePath (Join-Path $env:PAYLOAD 'SyntexLauncher.exe') -ArgumentList '--host-log-self-test' -PassThru -Wait
           if ($logTest.ExitCode -ne 0) { throw "Startup log self-test failed: $($logTest.ExitCode)" }
-          $host = Start-Process -FilePath (Join-Path $env:PAYLOAD 'SyntexLauncher.exe') -PassThru
-          if (-not $host.WaitForExit(20000)) { Stop-Process -Id $host.Id -Force; throw 'Native launcher host did not finish startup supervision.' }
-          if ($host.ExitCode -ne 0) { throw "Native launcher host reported startup failure: $($host.ExitCode)" }
-          Get-Process SyntexLauncher -ErrorAction SilentlyContinue | Where-Object { $_.Id -ne $host.Id } | Stop-Process -Force -ErrorAction SilentlyContinue
+          $launcherHost = Start-Process -FilePath (Join-Path $env:PAYLOAD 'SyntexLauncher.exe') -PassThru
+          if (-not $launcherHost.WaitForExit(20000)) { Stop-Process -Id $launcherHost.Id -Force; throw 'Native launcher host did not finish startup supervision.' }
+          if ($launcherHost.ExitCode -ne 0) { throw "Native launcher host reported startup failure: $($launcherHost.ExitCode)" }
+          Get-Process SyntexLauncher -ErrorAction SilentlyContinue | Where-Object { $_.Id -ne $launcherHost.Id } | Stop-Process -Force -ErrorAction SilentlyContinue
           Remove-Item (Join-Path $env:PAYLOAD 'storage') -Recurse -Force -ErrorAction SilentlyContinue
 
       - name: Create maximum-compression payload
