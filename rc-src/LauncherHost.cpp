@@ -96,7 +96,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
     fs::path exe = ExePath();
     if (exe.empty()) return 90;
     fs::path root = exe.parent_path();
-    fs::path child = root / L"app" / L"SyntexLauncher.App.exe";
+    fs::path child = root / L"app" / L"SyntexLauncher.exe";
     auto args = Arguments();
 
     if (args.size() == 1 && _wcsicmp(args[0].c_str(), L"--host-log-self-test") == 0) {
@@ -106,7 +106,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
 
     const bool ciGui = args.size() == 1 && _wcsicmp(args[0].c_str(), L"--ci-gui-self-test") == 0;
     if (!fs::exists(child)) {
-        auto log = WriteLog(root, L"Startfehler: app\\SyntexLauncher.App.exe fehlt.\r\nRoot: " + root.wstring() + L"\r\n");
+        auto log = WriteLog(root, L"Startfehler: app\\SyntexLauncher.exe fehlt.\r\nRoot: " + root.wstring() + L"\r\n");
         MessageBoxW(nullptr, (L"Syntex Launcher ist unvollständig.\n\nDiagnose: " + log.wstring()).c_str(), L"Syntex Launcher – Startfehler", MB_OK | MB_ICONERROR);
         return 92;
     }
