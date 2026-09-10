@@ -1,0 +1,83 @@
+name: Syntex 0.16.7 Setup Real Rollback E2E
+
+on:
+  push:
+    branches: ['feat/0.16.7-self-update']
+    paths:
+      - 'rc-src/Setup.cpp'
+      - 'rc-src/RepairTransaction.h'
+      - 'self-update-test.json'
+      - '.github/workflows/0167-setup-real-rollback-e2e.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows-real-setup-rollback:
+    runs-on: windows-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/0.16.7-self-update
+      - name: Locate Visual C++ x64 toolchain
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $vswhere=Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+          $vs=& $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if([string]::IsNullOrWhiteSpace($vs)){throw 'Visual C++ x64 tools not found.'}
+          "VSDEVCMD=$(Join-Path $vs 'Common7\Tools\VsDevCmd.bat')" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+      - name: Build real setup against verified candidate contract
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $m=Get-Content .\self-update-test.json -Raw | ConvertFrom-Json
+          $hdr=Join-Path $env:GITHUB_WORKSPACE 'rc-src\PayloadContract.h'
+          $lines=@(
+            '#pragma once',
+            ('static constexpr wchar_t PAYLOAD_URL[] = L"{0}";' -f $m.payload.url),
+            ('static constexpr wchar_t PAYLOAD_SHA256[] = L"{0}";' -f $m.payload.sha256),
+            ('static constexpr unsigned long long PAYLOAD_SIZE = {0}ULL;' -f $m.payload.size)
+          )
+          $lines | Set-Content $hdr -Encoding utf8
+          $out=Join-Path $env:RUNNER_TEMP 'SyntexSetup-0.16.7-x64.exe'
+          $cmd=Join-Path $env:RUNNER_TEMP 'build-setup.cmd'
+          @('@echo on',"call `"$env:VSDEVCMD`" -arch=x64 -host_arch=x64",'if errorlevel 1 exit /b %errorlevel%',"cl.exe /nologo /utf-8 /std:c++20 /EHsc /W4 /O2 /MT /I`"$env:GITHUB_WORKSPACE\rc-src`" `"$env:GITHUB_WORKSPACE\rc-src\Setup.cpp`" /Fe:`"$out`" /link /SUBSYSTEM:WINDOWS /MACHINE:X64 winhttp.lib bcrypt.lib shell32.lib ole32.lib user32.lib gdi32.lib advapi32.lib comctl32.lib uxtheme.lib",'exit /b %errorlevel%') | Set-Content $cmd -Encoding ascii
+          & cmd.exe /d /c $cmd
+          if($LASTEXITCODE -ne 0){throw "Setup compile failed: $LASTEXITCODE"}
+          "SETUP_EXE=$out" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+      - name: Prove real setup restores prior program and preserves user data on healthcheck failure
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $root=Join-Path $env:RUNNER_TEMP 'syntex-setup-real-rollback-root'
+          New-Item -ItemType Directory -Force -Path $root,(Join-Path $root 'app'),(Join-Path $root 'storage'),(Join-Path $root 'data'),(Join-Path $root 'instances'),(Join-Path $root 'runtimes') | Out-Null
+          [IO.File]::WriteAllBytes((Join-Path $root 'SyntexLauncher.exe'),[byte[]](0x4d,0x5a,1,2,3,4,5))
+          'OLD_APP' | Set-Content (Join-Path $root 'app\old-program.txt') -Encoding ascii
+          'STORAGE_KEEP' | Set-Content (Join-Path $root 'storage\keep.txt') -Encoding ascii
+          'DATA_KEEP' | Set-Content (Join-Path $root 'data\keep.txt') -Encoding ascii
+          'WORLD_KEEP' | Set-Content (Join-Path $root 'instances\keep.txt') -Encoding ascii
+          'RUNTIME_KEEP' | Set-Content (Join-Path $root 'runtimes\keep.txt') -Encoding ascii
+          $oldHost=(Get-FileHash (Join-Path $root 'SyntexLauncher.exe') -Algorithm SHA256).Hash
+          $p=Start-Process $env:SETUP_EXE -ArgumentList @('--ci-install',"`"$root`"") -PassThru -Wait
+          if($p.ExitCode -eq 0){throw 'Setup unexpectedly succeeded; rollback path was not exercised.'}
+          if((Get-FileHash (Join-Path $root 'SyntexLauncher.exe') -Algorithm SHA256).Hash -ne $oldHost){throw 'Old root launcher was not restored.'}
+          if((Get-Content (Join-Path $root 'app\old-program.txt') -Raw).Trim() -ne 'OLD_APP'){throw 'Old app program state was not restored.'}
+          foreach($pair in @(@('storage\keep.txt','STORAGE_KEEP'),@('data\keep.txt','DATA_KEEP'),@('instances\keep.txt','WORLD_KEEP'),@('runtimes\keep.txt','RUNTIME_KEEP'))){ if((Get-Content (Join-Path $root $pair[0]) -Raw).Trim() -ne $pair[1]){throw "Preserved data changed: $($pair[0])"} }
+          $logDir=Join-Path (Split-Path $env:SETUP_EXE -Parent) 'SyntexSetup-Log'
+          $logs=Get-ChildItem $logDir -File -ErrorAction Stop
+          if(-not $logs){throw 'Expected setup error log next to setup executable.'}
+          $text=($logs | ForEach-Object { Get-Content $_.FullName -Raw }) -join "`n"
+          if($text -notmatch 'sichtbares Launcherfenster'){throw 'Real setup failure log did not record launcher-window healthcheck failure.'}
+          Write-Host 'REAL_SETUP_TRANSACTIONAL_ROLLBACK_AND_USER_DATA_PRESERVATION_PASS'
+      - name: Upload verified x64 setup executable
+        uses: actions/upload-artifact@v4
+        with:
+          name: SyntexSetup-0.16.7-x64-verified-rollback
+          path: ${{ env.SETUP_EXE }}
+          if-no-files-found: error
+          retention-days: 7
+
+# Publishes the exact x64 setup executable that passed the transactional rollback/user-data-preservation E2E.

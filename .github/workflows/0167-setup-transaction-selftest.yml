@@ -1,0 +1,79 @@
+name: Syntex 0.16.7 Setup Transaction Selftest
+
+on:
+  push:
+    branches: ['feat/0.16.7-self-update']
+    paths:
+      - 'rc-src/RepairTransaction.h'
+      - '.github/workflows/0167-setup-transaction-selftest.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows-transaction-selftest:
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/0.16.7-self-update
+
+      - name: Locate Visual C++ x64 toolchain
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+          $vs = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if ([string]::IsNullOrWhiteSpace($vs)) { throw 'Visual C++ x64 tools not found.' }
+          $dev = Join-Path $vs 'Common7\Tools\VsDevCmd.bat'
+          "VSDEVCMD=$dev" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Compile exact repair transaction core
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $source = Join-Path $env:RUNNER_TEMP 'repair-transaction-selftest.cpp'
+          @'
+          #include "RepairTransaction.h"
+          #include <iostream>
+          int main() {
+              if (!SyntexSetupRepair::RunFilesystemSelfTest()) {
+                  std::cerr << "SETUP_TRANSACTION_SELFTEST_FAILED\n";
+                  return 1;
+              }
+              std::cout << "SETUP_TRANSACTION_SELFTEST_PASS\n";
+              return 0;
+          }
+          '@ | Set-Content -LiteralPath $source -Encoding utf8
+          $exe = Join-Path $env:RUNNER_TEMP 'repair-transaction-selftest.exe'
+          $cmd = Join-Path $env:RUNNER_TEMP 'build-repair-transaction-selftest.cmd'
+          @(
+            '@echo on',
+            "call `"$env:VSDEVCMD`" -arch=x64 -host_arch=x64",
+            'if errorlevel 1 exit /b %errorlevel%',
+            "cl.exe /nologo /utf-8 /std:c++20 /EHsc /W4 /O2 /MT /I`"$env:GITHUB_WORKSPACE\rc-src`" `"$source`" /Fe:`"$exe`" /link /MACHINE:X64",
+            'exit /b %errorlevel%'
+          ) | Set-Content -LiteralPath $cmd -Encoding ascii
+          & cmd.exe /d /c $cmd
+          if ($LASTEXITCODE -ne 0) { throw "Repair transaction compile failed: $LASTEXITCODE" }
+          "SELFTEST_EXE=$exe" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Run real filesystem commit and rollback test
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          & $env:SELFTEST_EXE
+          if ($LASTEXITCODE -ne 0) { throw "Repair transaction selftest failed: $LASTEXITCODE" }
+
+      - name: Verify x64 test binary
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $bytes = [IO.File]::ReadAllBytes($env:SELFTEST_EXE)
+          if ($bytes[0] -ne 0x4D -or $bytes[1] -ne 0x5A) { throw 'Selftest output is not PE.' }
+          $pe = [BitConverter]::ToInt32($bytes, 0x3C)
+          $machine = [BitConverter]::ToUInt16($bytes, $pe + 4)
+          if ($machine -ne 0x8664) { throw ("Expected AMD64 PE machine 0x8664, got 0x{0:X4}" -f $machine) }
+          Write-Host 'SETUP_TRANSACTION_WINDOWS_X64_PASS'

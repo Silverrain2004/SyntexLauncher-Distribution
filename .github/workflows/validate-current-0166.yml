@@ -1,0 +1,166 @@
+name: Validate Current Syntex 0.16.6
+
+on:
+  push:
+    branches: ['feat/0.16.7-self-update']
+    paths:
+      - '.github/workflows/validate-current-0166.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate-current-stable:
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - name: Download and verify current public release assets
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $payloadUrl = 'https://github.com/Silverrain2004/SyntexLauncher-Distribution/releases/download/v0.16.6/SyntexLauncher-0.16.6-win-x64.zip'
+          $setupUrl = 'https://github.com/Silverrain2004/SyntexLauncher-Distribution/releases/download/v0.16.6/SyntexLauncherSetup-0.16.6-win-x64.exe'
+          $payload = Join-Path $env:RUNNER_TEMP 'SyntexLauncher-0.16.6-win-x64.zip'
+          $setup = Join-Path $env:RUNNER_TEMP 'SyntexLauncherSetup-0.16.6-win-x64.exe'
+          Invoke-WebRequest -Uri $payloadUrl -OutFile $payload -UseBasicParsing
+          Invoke-WebRequest -Uri $setupUrl -OutFile $setup -UseBasicParsing
+          $payloadSize = (Get-Item $payload).Length
+          $payloadHash = (Get-FileHash $payload -Algorithm SHA256).Hash.ToLowerInvariant()
+          $setupSize = (Get-Item $setup).Length
+          $setupHash = (Get-FileHash $setup -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($payloadSize -ne 69903997) { throw "Unexpected payload size: $payloadSize" }
+          if ($payloadHash -ne 'f34397dae9ca7986ef5d8f9183c6d4ee355126d2c9b913dea6eee561835ada74') { throw "Unexpected payload SHA256: $payloadHash" }
+          if ($setupSize -ne 331776) { throw "Unexpected setup size: $setupSize" }
+          if ($setupHash -ne '7d785b1b4205ccb9bc59ab630bebd93a9853ba8f4bbf491f8315091e12241c17') { throw "Unexpected setup SHA256: $setupHash" }
+          "PAYLOAD=$payload" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          "SETUP=$setup" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          Write-Host "PUBLIC_0166_ASSETS_VERIFIED payload=$payloadHash setup=$setupHash"
+
+      - name: Verify AMD64 setup and payload layout
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          function Assert-X64([string]$Path) {
+            $bytes = [IO.File]::ReadAllBytes($Path)
+            if ($bytes.Length -lt 512 -or $bytes[0] -ne 0x4D -or $bytes[1] -ne 0x5A) { throw "$Path is not PE." }
+            $pe = [BitConverter]::ToInt32($bytes, 0x3C)
+            $machine = [BitConverter]::ToUInt16($bytes, $pe + 4)
+            if ($machine -ne 0x8664) { throw "$Path is not AMD64: 0x$('{0:X4}' -f $machine)" }
+          }
+          Assert-X64 $env:SETUP
+          $unpack = Join-Path $env:RUNNER_TEMP 'payload-check'
+          Expand-Archive -LiteralPath $env:PAYLOAD -DestinationPath $unpack -Force
+          Assert-X64 (Join-Path $unpack 'SyntexLauncher.exe')
+          if (-not (Test-Path (Join-Path $unpack 'app\SyntexLauncher.App.exe'))) { throw 'Managed apphost missing from payload.' }
+          if (-not (Test-Path (Join-Path $unpack 'app\SyntexUninstall.exe'))) { throw 'Uninstaller missing from payload.' }
+          Write-Host 'PUBLIC_0166_LAYOUT_X64_PASS'
+
+      - name: Full public setup GUI install and real launcher window verification
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Add-Type @'
+          using System;
+          using System.Text;
+          using System.Runtime.InteropServices;
+          public static class SyntexUi {
+            public delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
+            [DllImport("user32.dll")] public static extern IntPtr GetDlgItem(IntPtr hwnd, int id);
+            [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern bool SetWindowText(IntPtr hwnd, string text);
+            [DllImport("user32.dll")] public static extern IntPtr SendMessage(IntPtr hwnd, uint msg, IntPtr wp, IntPtr lp);
+            [DllImport("user32.dll")] public static extern bool EnumWindows(EnumWindowsProc callback, IntPtr lParam);
+            [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr hwnd);
+            [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hwnd, out uint processId);
+            [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetWindowText(IntPtr hwnd, StringBuilder text, int max);
+          }
+          '@
+
+          function Find-VisibleWindowForPid([uint32]$ExpectedPid) {
+            $script:foundPidWindow = [IntPtr]::Zero
+            $callback = [SyntexUi+EnumWindowsProc]{
+              param([IntPtr]$hwnd, [IntPtr]$lparam)
+              if (-not [SyntexUi]::IsWindowVisible($hwnd)) { return $true }
+              [uint32]$windowPid = 0
+              [void][SyntexUi]::GetWindowThreadProcessId($hwnd, [ref]$windowPid)
+              if ($windowPid -eq $ExpectedPid) { $script:foundPidWindow = $hwnd; return $false }
+              return $true
+            }
+            [void][SyntexUi]::EnumWindows($callback, [IntPtr]::Zero)
+            return $script:foundPidWindow
+          }
+
+          function Dump-Diagnostics([string]$Target) {
+            $setupLogDir = Join-Path (Split-Path $env:SETUP -Parent) 'SyntexSetup-Log'
+            if (Test-Path $setupLogDir) { Get-ChildItem $setupLogDir -File | ForEach-Object { Write-Host "--- $($_.Name) ---"; Get-Content $_.FullName -Raw } }
+            foreach ($relative in @('data\logs\launcher-startup','storage\logs\launcher-startup')) {
+              $startupLogs = Join-Path $Target $relative
+              if (Test-Path $startupLogs) { Get-ChildItem $startupLogs -File | ForEach-Object { Write-Host "--- $($_.Name) ---"; Get-Content $_.FullName -Raw } }
+            }
+          }
+
+          function Find-VisibleSyntexLauncherWindow([uint32]$SetupPid) {
+            $script:foundSyntexWindow = $null
+            $callback = [SyntexUi+EnumWindowsProc]{
+              param([IntPtr]$hwnd, [IntPtr]$lparam)
+              if (-not [SyntexUi]::IsWindowVisible($hwnd)) { return $true }
+              [uint32]$windowPid = 0
+              [void][SyntexUi]::GetWindowThreadProcessId($hwnd, [ref]$windowPid)
+              if ($windowPid -eq $SetupPid) { return $true }
+              try { $proc = Get-Process -Id $windowPid -ErrorAction Stop } catch { return $true }
+              if ($proc.ProcessName -notlike 'SyntexLauncher*' -or $proc.ProcessName -like '*Setup*') { return $true }
+              $title = New-Object Text.StringBuilder 512
+              [void][SyntexUi]::GetWindowText($hwnd, $title, $title.Capacity)
+              if ($title.Length -gt 0) {
+                $script:foundSyntexWindow = [pscustomobject]@{ Handle=$hwnd; ProcessId=$windowPid; ProcessName=$proc.ProcessName; Title=$title.ToString() }
+                return $false
+              }
+              return $true
+            }
+            [void][SyntexUi]::EnumWindows($callback, [IntPtr]::Zero)
+            return $script:foundSyntexWindow
+          }
+
+          $target = Join-Path $env:RUNNER_TEMP 'Syntex-0166-current-validation'
+          Remove-Item $target -Recurse -Force -ErrorAction SilentlyContinue
+          Get-Process SyntexLauncher* -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+          $setupProcess = Start-Process -FilePath $env:SETUP -PassThru
+          try {
+            $deadline = [DateTime]::UtcNow.AddSeconds(30)
+            $setupWindow = [IntPtr]::Zero
+            while ([DateTime]::UtcNow -lt $deadline -and $setupWindow -eq [IntPtr]::Zero) {
+              if ($setupProcess.HasExited) { Dump-Diagnostics $target; throw "Published setup exited before exposing a GUI. Exit code: $($setupProcess.ExitCode)" }
+              Start-Sleep -Milliseconds 250
+              $setupWindow = Find-VisibleWindowForPid ([uint32]$setupProcess.Id)
+            }
+            if ($setupWindow -eq [IntPtr]::Zero) { Dump-Diagnostics $target; throw 'Published setup did not expose a visible top-level setup window.' }
+
+            $pathEdit = [SyntexUi]::GetDlgItem($setupWindow, 1001)
+            $installButton = [SyntexUi]::GetDlgItem($setupWindow, 1003)
+            if ($pathEdit -eq [IntPtr]::Zero -or $installButton -eq [IntPtr]::Zero) { throw 'Published setup controls were not found.' }
+            if (-not [SyntexUi]::SetWindowText($pathEdit, $target)) { throw 'Could not set setup target path.' }
+            [void][SyntexUi]::SendMessage($installButton, 0x00F5, [IntPtr]::Zero, [IntPtr]::Zero)
+
+            $deadline = [DateTime]::UtcNow.AddMinutes(3)
+            $launcherWindow = $null
+            while ([DateTime]::UtcNow -lt $deadline) {
+              $allFilesPresent = $true
+              foreach ($required in @('SyntexLauncher.exe','app\SyntexLauncher.App.exe','app\SyntexUninstall.exe')) {
+                if (-not (Test-Path (Join-Path $target $required) -PathType Leaf)) { $allFilesPresent = $false; break }
+              }
+              if ($allFilesPresent) {
+                $launcherWindow = Find-VisibleSyntexLauncherWindow ([uint32]$setupProcess.Id)
+                if ($null -ne $launcherWindow) { break }
+              }
+              Start-Sleep -Milliseconds 500
+            }
+            if ($null -eq $launcherWindow) {
+              Dump-Diagnostics $target
+              throw 'Published 0.16.6 setup did not produce a real visible Syntex Launcher window within 3 minutes.'
+            }
+            Write-Host "PUBLIC_0166_INSTALL_START_PASS hwnd=$($launcherWindow.Handle) pid=$($launcherWindow.ProcessId) process=$($launcherWindow.ProcessName) title=$($launcherWindow.Title)"
+          }
+          finally {
+            Get-Process SyntexLauncher* -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+            if (-not $setupProcess.HasExited) { Stop-Process -Id $setupProcess.Id -Force -ErrorAction SilentlyContinue }
+          }
