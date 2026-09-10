@@ -14,6 +14,8 @@ jobs:
   windows-x64-public-distribution:
     runs-on: windows-latest
     steps:
+      - uses: actions/checkout@v4
+
       - name: Validate manifest and immutable release payload
         shell: pwsh
         run: |
