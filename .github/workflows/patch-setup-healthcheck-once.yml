@@ -1,0 +1,40 @@
+name: Patch Setup Healthcheck Once
+
+on:
+  push:
+    branches: ['feat/0.16.7-self-update']
+    paths:
+      - '.github/workflows/patch-setup-healthcheck-once.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/0.16.7-self-update
+      - name: Harden setup source
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $path='rc-src/Setup.cpp'
+          $text=Get-Content $path -Raw
+          $oldLib='#pragma comment(lib, "user32.lib")'
+          $newLib="#pragma comment(lib, `"user32.lib`")`n#pragma comment(lib, `"gdi32.lib`")"
+          if(($text.Split($oldLib).Count-1) -ne 1){throw 'Expected exactly one user32 pragma.'}
+          $text=$text.Replace($oldLib,$newLib)
+          $oldTimeout='if (!RunProcess(command, root, code, error, 40000)) {'
+          $newTimeout='if (!RunProcess(command, root, code, error, 135000)) {'
+          if(($text.Split($oldTimeout).Count-1) -ne 1){throw 'Expected exactly one 40-second launcher verification timeout.'}
+          $text=$text.Replace($oldTimeout,$newTimeout)
+          [IO.File]::WriteAllText((Resolve-Path $path),$text,(New-Object Text.UTF8Encoding($false)))
+          git diff --check
+          git diff -- $path
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add $path
+          git commit -m 'Harden setup launcher healthcheck timeout'
+          git push origin HEAD:feat/0.16.7-self-update
