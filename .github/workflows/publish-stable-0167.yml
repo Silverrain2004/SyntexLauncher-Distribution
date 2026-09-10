@@ -94,7 +94,6 @@ jobs:
 
   verify-approved-inputs:
     name: verify-approved-stable-inputs
-    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
     needs: immutable-publish-contract
     runs-on: windows-latest
     permissions:
@@ -103,13 +102,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Enforce main and immutable version availability
+      - name: Enforce main for mutable events and immutable version availability
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           $ErrorActionPreference = 'Stop'
-          if ('${{ github.ref }}' -ne 'refs/heads/main') { throw 'Stable input verification is allowed only from main.' }
+          if ('${{ github.event_name }}' -ne 'pull_request' -and '${{ github.ref }}' -ne 'refs/heads/main') { throw 'Stable input verification outside pull requests is allowed only from main.' }
           & ./scripts/Assert-NewStableVersion.ps1 -Repository '${{ github.repository }}' -Version $env:VERSION
           if ($LASTEXITCODE -ne 0) { throw 'Stable version is not safely available.' }
 
