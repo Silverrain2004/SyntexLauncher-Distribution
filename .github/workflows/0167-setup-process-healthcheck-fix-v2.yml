@@ -1,10 +1,11 @@
-name: Syntex 0.16.7 Setup Process and Healthcheck Fix V2
+name: Syntex 0.16.7 Setup Process Fix Verified
 
 on:
   push:
     branches: ['fix/0.16.7-setup-process-healthcheck']
     paths:
       - '.github/workflows/0167-setup-process-healthcheck-fix-v2.yml'
+      - 'scripts/Patch-SetupProcessShutdown.ps1'
   workflow_dispatch:
 
 permissions:
@@ -21,89 +22,105 @@ jobs:
       BASE_URL: https://github.com/Silverrain2004/SyntexLauncher-Distribution/releases/download/v0.16.6/SyntexLauncher-0.16.6-win-x64.zip
       BASE_SHA: f34397dae9ca7986ef5d8f9183c6d4ee355126d2c9b913dea6eee561835ada74
       BASE_SIZE: 69903997
-      HELPER_B64: c3RhdGljIGJvb2wgSXNQYXRoSW5zaWRlU2V0dXAoY29uc3QgZnM6OnBhdGgmIGNhbmRpZGF0ZSwgY29uc3QgZnM6OnBhdGgmIGRpcmVjdG9yeSkgewogICAgc3RkOjplcnJvcl9jb2RlIGVjOwogICAgY29uc3QgZnM6OnBhdGggdmFsdWUgPSBmczo6YWJzb2x1dGUoY2FuZGlkYXRlLCBlYykubGV4aWNhbGx5X25vcm1hbCgpOwogICAgaWYgKGVjKSByZXR1cm4gZmFsc2U7CiAgICBlYy5jbGVhcigpOwogICAgZnM6OnBhdGggcHJlZml4ID0gZnM6OmFic29sdXRlKGRpcmVjdG9yeSwgZWMpLmxleGljYWxseV9ub3JtYWwoKTsKICAgIGlmIChlYykgcmV0dXJuIGZhbHNlOwogICAgYXV0byB2ID0gdmFsdWUud3N0cmluZygpOwogICAgYXV0byBwID0gcHJlZml4LndzdHJpbmcoKTsKICAgIHdoaWxlICghcC5lbXB0eSgpICYmIChwLmJhY2soKSA9PSBMJ1xcJyB8fCBwLmJhY2soKSA9PSBMJy8nKSkgcC5wb3BfYmFjaygpOwogICAgcC5wdXNoX2JhY2soTCdcXCcpOwogICAgcmV0dXJuIHYuc2l6ZSgpID49IHAuc2l6ZSgpICYmIF93Y3NuaWNtcCh2LmNfc3RyKCksIHAuY19zdHIoKSwgcC5zaXplKCkpID09IDA7Cn0KCnN0YXRpYyB2b2lkIFN0b3BMYXVuY2hlclByb2dyYW1Qcm9jZXNzZXMoY29uc3QgZnM6OnBhdGgmIHJvb3QpIG5vZXhjZXB0IHsKICAgIHRyeSB7CiAgICAgICAgc3RkOjplcnJvcl9jb2RlIGVjOwogICAgICAgIGNvbnN0IGZzOjpwYXRoIGhvc3RQYXRoID0gZnM6OmFic29sdXRlKHJvb3QgLyBMIlN5bnRleExhdW5jaGVyLmV4ZSIsIGVjKS5sZXhpY2FsbHlfbm9ybWFsKCk7CiAgICAgICAgaWYgKGVjKSByZXR1cm47CiAgICAgICAgZWMuY2xlYXIoKTsKICAgICAgICBjb25zdCBmczo6cGF0aCBhcHBQYXRoID0gZnM6OmFic29sdXRlKHJvb3QgLyBMImFwcCIsIGVjKS5sZXhpY2FsbHlfbm9ybWFsKCk7CiAgICAgICAgaWYgKGVjKSByZXR1cm47CgogICAgICAgIEhBTkRMRSBzbmFwc2hvdCA9IENyZWF0ZVRvb2xoZWxwMzJTbmFwc2hvdChUSDMyQ1NfU05BUFBST0NFU1MsIDApOwogICAgICAgIGlmIChzbmFwc2hvdCA9PSBJTlZBTElEX0hBTkRMRV9WQUxVRSkgcmV0dXJuOwogICAgICAgIFBST0NFU1NFTlRSWTMyVyBlbnRyeXt9OwogICAgICAgIGVudHJ5LmR3U2l6ZSA9IHNpemVvZihlbnRyeSk7CiAgICAgICAgaWYgKFByb2Nlc3MzMkZpcnN0VyhzbmFwc2hvdCwgJmVudHJ5KSkgewogICAgICAgICAgICBkbyB7CiAgICAgICAgICAgICAgICBpZiAoZW50cnkudGgzMlByb2Nlc3NJRCA9PSAwIHx8IGVudHJ5LnRoMzJQcm9jZXNzSUQgPT0gR2V0Q3VycmVudFByb2Nlc3NJZCgpKSBjb250aW51ZTsKICAgICAgICAgICAgICAgIEhBTkRMRSBwcm9jZXNzID0gT3BlblByb2Nlc3MoUFJPQ0VTU19RVUVSWV9MSU1JVEVEX0lORk9STUFUSU9OIHwgUFJPQ0VTU19URVJNSU5BVEUgfCBTWU5DSFJPTklaRSwgRkFMU0UsIGVudHJ5LnRoMzJQcm9jZXNzSUQpOwogICAgICAgICAgICAgICAgaWYgKCFwcm9jZXNzKSBjb250aW51ZTsKICAgICAgICAgICAgICAgIHN0ZDo6d3N0cmluZyBpbWFnZSgzMjc2OCwgTCdcMCcpOwogICAgICAgICAgICAgICAgRFdPUkQgaW1hZ2VMZW5ndGggPSBzdGF0aWNfY2FzdDxEV09SRD4oaW1hZ2Uuc2l6ZSgpKTsKICAgICAgICAgICAgICAgIGJvb2wgYmVsb25nc1RvTGF1bmNoZXIgPSBmYWxzZTsKICAgICAgICAgICAgICAgIGlmIChRdWVyeUZ1bGxQcm9jZXNzSW1hZ2VOYW1lVyhwcm9jZXNzLCAwLCBpbWFnZS5kYXRhKCksICZpbWFnZUxlbmd0aCkgJiYgaW1hZ2VMZW5ndGggPiAwKSB7CiAgICAgICAgICAgICAgICAgICAgaW1hZ2UucmVzaXplKGltYWdlTGVuZ3RoKTsKICAgICAgICAgICAgICAgICAgICBjb25zdCBmczo6cGF0aCBwcm9jZXNzUGF0aCA9IGZzOjpwYXRoKGltYWdlKS5sZXhpY2FsbHlfbm9ybWFsKCk7CiAgICAgICAgICAgICAgICAgICAgYmVsb25nc1RvTGF1bmNoZXIgPSBfd2NzaWNtcChwcm9jZXNzUGF0aC5jX3N0cigpLCBob3N0UGF0aC5jX3N0cigpKSA9PSAwIHx8IElzUGF0aEluc2lkZVNldHVwKHByb2Nlc3NQYXRoLCBhcHBQYXRoKTsKICAgICAgICAgICAgICAgIH0KICAgICAgICAgICAgICAgIGlmIChiZWxvbmdzVG9MYXVuY2hlcikgewogICAgICAgICAgICAgICAgICAgIFRlcm1pbmF0ZVByb2Nlc3MocHJvY2VzcywgMjA2KTsKICAgICAgICAgICAgICAgICAgICBXYWl0Rm9yU2luZ2xlT2JqZWN0KHByb2Nlc3MsIDUwMDApOwogICAgICAgICAgICAgICAgfQogICAgICAgICAgICAgICAgQ2xvc2VIYW5kbGUocHJvY2Vzcyk7CiAgICAgICAgICAgIH0gd2hpbGUgKFByb2Nlc3MzMk5leHRXKHNuYXBzaG90LCAmZW50cnkpKTsKICAgICAgICB9CiAgICAgICAgQ2xvc2VIYW5kbGUoc25hcHNob3QpOwogICAgfSBjYXRjaCAoLi4uKSB7CiAgICB9Cn0KCg==
 
     steps:
       - uses: actions/checkout@v4
 
       - name: Patch Setup source
         shell: pwsh
-        run: |
-          $ErrorActionPreference='Stop'
-          $src=Join-Path $env:GITHUB_WORKSPACE 'rc-src\Setup.cpp'
-          $s=Get-Content $src -Raw
-          $s=$s.Replace('#include <windows.h>', "#include <windows.h>`r`n#include <tlhelp32.h>")
-          $anchor='static bool LaunchVerify(const fs::path& root, bool ciMode, std::wstring& error) {'
-          if(-not $s.Contains($anchor)){throw 'LaunchVerify anchor missing'}
-          $helper=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($env:HELPER_B64))
-          $s=$s.Replace($anchor,$helper+$anchor)
-          $old='const std::wstring command = Quote(host.wstring()) + (ciMode ? L" --ci-gui-self-test" : L"");'
-          if(-not $s.Contains($old)){throw 'LaunchVerify command anchor missing'}
-          $s=$s.Replace($old,'const std::wstring command = Quote(host.wstring()) + L" --post-update-health-check";')
-          $old2='if (!ValidateWritableRoot(root, error)) { cleanup(); return false; }'
-          if(-not $s.Contains($old2)){throw 'Writable-root anchor missing'}
-          $new2=$old2+"`r`n`r`n    progress(6, L`"Laufender Syntex Launcher wird für Installation/Aktualisierung beendet …`" );`r`n    StopLauncherProgramProcesses(root);`r`n    Sleep(250);"
-          $s=$s.Replace($old2,$new2)
-          $s=$s.Replace('Syntex Launcher Setup 0.16.6 RC1','Syntex Launcher Setup 0.16.7')
-          $s=$s.Replace('Syntex Launcher Setup 0.16.6','Syntex Launcher Setup 0.16.7')
-          $s=$s.Replace('SyntexLauncherSetup/0.16.6-RC1','SyntexLauncherSetup/0.16.7')
-          $s=$s.Replace('DisplayVersion", L"0.16.6"','DisplayVersion", L"0.16.7"')
-          Set-Content $src $s -Encoding utf8
-          $check=Get-Content $src -Raw
-          foreach($needle in @('#include <tlhelp32.h>','StopLauncherProgramProcesses(root);','--post-update-health-check','Syntex Launcher Setup 0.16.7')){if(-not $check.Contains($needle)){throw "missing $needle"}}
-          Write-Host 'SETUP_PROCESS_REAL_HEALTHCHECK_PATCH_PASS'
+        run: ./scripts/Patch-SetupProcessShutdown.ps1 -SetupSource ./rc-src/Setup.cpp
 
-      - name: Verify inputs
+      - name: Verify immutable inputs
         shell: pwsh
         run: |
           $ErrorActionPreference='Stop'
-          $work=Join-Path $env:RUNNER_TEMP 'setup-process-fix-v2';$dist=Join-Path $work 'dist';New-Item -ItemType Directory -Force $work,$dist|Out-Null
-          function Get-Verified($url,$sha,$size,$name){$p=Join-Path $env:RUNNER_TEMP $name;Invoke-WebRequest $url -OutFile $p -UseBasicParsing;if((Get-Item $p).Length -ne [int64]$size){throw "$name size mismatch"};if((Get-FileHash $p -Algorithm SHA256).Hash.ToLowerInvariant() -ne $sha){throw "$name hash mismatch"};$p}
-          $base=Get-Verified $env:BASE_URL $env:BASE_SHA $env:BASE_SIZE 'base-v2.zip';$null=Get-Verified $env:GOOD_URL $env:GOOD_SHA $env:GOOD_SIZE 'good-v2.zip'
-          "WORK=$work"|Out-File $env:GITHUB_ENV -Encoding utf8 -Append;"DIST=$dist"|Out-File $env:GITHUB_ENV -Encoding utf8 -Append;"BASE_ZIP=$base"|Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          $work=Join-Path $env:RUNNER_TEMP 'setup-process-verified'
+          $dist=Join-Path $work 'dist'
+          New-Item -ItemType Directory -Force $work,$dist|Out-Null
+          function Get-Verified($url,$sha,$size,$name){
+            $p=Join-Path $work $name
+            Invoke-WebRequest $url -OutFile $p -UseBasicParsing
+            if((Get-Item $p).Length -ne [int64]$size){throw "$name size mismatch"}
+            if((Get-FileHash $p -Algorithm SHA256).Hash.ToLowerInvariant() -ne $sha){throw "$name hash mismatch"}
+            return $p
+          }
+          $base=Get-Verified $env:BASE_URL $env:BASE_SHA $env:BASE_SIZE 'base.zip'
+          $null=Get-Verified $env:GOOD_URL $env:GOOD_SHA $env:GOOD_SIZE 'good.zip'
+          "WORK=$work"|Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          "DIST=$dist"|Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          "BASE_ZIP=$base"|Out-File $env:GITHUB_ENV -Encoding utf8 -Append
 
-      - name: Build fixed setup x64
+      - name: Build fixed x64 setup
         shell: pwsh
         run: |
           $ErrorActionPreference='Stop'
-          @('#pragma once',("static constexpr wchar_t PAYLOAD_URL[] = L`"{0}`";" -f $env:GOOD_URL),("static constexpr wchar_t PAYLOAD_SHA256[] = L`"{0}`";" -f $env:GOOD_SHA),("static constexpr unsigned long long PAYLOAD_SIZE = {0}ULL;" -f $env:GOOD_SIZE))|Set-Content .\rc-src\PayloadContract.h -Encoding utf8
-          $vswhere=Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe';$vs=&$vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath;if([string]::IsNullOrWhiteSpace($vs)){throw 'VC++ x64 missing'};$dev=Join-Path $vs 'Common7\Tools\VsDevCmd.bat'
-          $src=Join-Path $env:GITHUB_WORKSPACE 'rc-src\Setup.cpp';$out=Join-Path $env:DIST 'SyntexSetup-0.16.7-x64-PROCESS-FIX.exe';$cmd=Join-Path $env:RUNNER_TEMP 'build-process-fix-v2.cmd'
-          @('@echo on',"call `"$dev`" -arch=x64 -host_arch=x64",'if errorlevel 1 exit /b %errorlevel%',"cl.exe /nologo /DNOMINMAX /utf-8 /std:c++20 /EHsc /W4 /O2 /MT /I`"$env:GITHUB_WORKSPACE\rc-src`" `"$src`" /Fe:`"$out`" /link /SUBSYSTEM:WINDOWS /MACHINE:X64 winhttp.lib bcrypt.lib shell32.lib ole32.lib user32.lib gdi32.lib advapi32.lib comctl32.lib uxtheme.lib",'exit /b %errorlevel%')|Set-Content $cmd -Encoding ascii
-          &cmd.exe /d /c $cmd;if($LASTEXITCODE -ne 0){throw 'Setup build failed'}
+          @('#pragma once',("static constexpr wchar_t PAYLOAD_URL[] = L`"{0}`";" -f $env:GOOD_URL),("static constexpr wchar_t PAYLOAD_SHA256[] = L`"{0}`";" -f $env:GOOD_SHA),("static constexpr unsigned long long PAYLOAD_SIZE = {0}ULL;" -f $env:GOOD_SIZE))|Set-Content ./rc-src/PayloadContract.h -Encoding utf8
+          $vswhere=Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+          $vs=&$vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if([string]::IsNullOrWhiteSpace($vs)){throw 'VC++ x64 missing'}
+          $dev=Join-Path $vs 'Common7\Tools\VsDevCmd.bat'
+          $out=Join-Path $env:DIST 'SyntexSetup-0.16.7-x64-PROCESS-FIX.exe'
+          $cmd=Join-Path $env:RUNNER_TEMP 'build-process-fix.cmd'
+          @('@echo on',"call `"$dev`" -arch=x64 -host_arch=x64",'if errorlevel 1 exit /b %errorlevel%',"cl.exe /nologo /DNOMINMAX /utf-8 /std:c++20 /EHsc /W4 /O2 /MT /I`"$env:GITHUB_WORKSPACE\rc-src`" `"$env:GITHUB_WORKSPACE\rc-src\Setup.cpp`" /Fe:`"$out`" /link /SUBSYSTEM:WINDOWS /MACHINE:X64 winhttp.lib bcrypt.lib shell32.lib ole32.lib user32.lib gdi32.lib advapi32.lib comctl32.lib uxtheme.lib",'exit /b %errorlevel%')|Set-Content $cmd -Encoding ascii
+          &cmd.exe /d /c $cmd
+          if($LASTEXITCODE-ne0){throw 'Setup build failed'}
           "FINAL_SETUP=$out"|Out-File $env:GITHUB_ENV -Encoding utf8 -Append
 
-      - name: Selftests and x64
+      - name: Verify selftests and AMD64
         shell: pwsh
         run: |
           $ErrorActionPreference='Stop'
-          foreach($arg in @('--self-test','--repair-self-test','--log-self-test')){$p=Start-Process $env:FINAL_SETUP -ArgumentList $arg -PassThru -Wait;if($p.ExitCode -ne 0){throw "$arg failed $($p.ExitCode)"}}
-          $b=[IO.File]::ReadAllBytes($env:FINAL_SETUP);if($b[0]-ne 0x4d -or $b[1]-ne 0x5a){throw 'MZ missing'};$lf=[BitConverter]::ToInt32($b,0x3c);if([BitConverter]::ToUInt16($b,$lf+4)-ne 0x8664){throw 'not AMD64'}
+          foreach($arg in @('--self-test','--repair-self-test','--log-self-test')){
+            $p=Start-Process $env:FINAL_SETUP -ArgumentList $arg -PassThru -Wait
+            if($p.ExitCode-ne0){throw "$arg failed: $($p.ExitCode)"}
+          }
+          $b=[IO.File]::ReadAllBytes($env:FINAL_SETUP)
+          if($b[0]-ne0x4d -or $b[1]-ne0x5a){throw 'MZ missing'}
+          $lf=[BitConverter]::ToInt32($b,0x3c)
+          if([BitConverter]::ToUInt16($b,$lf+4)-ne0x8664){throw 'Setup is not AMD64'}
           Write-Host 'SETUP_PROCESS_FIX_X64_SELFTEST_PASS'
 
-      - name: Existing launcher is terminated and real healthcheck passes
+      - name: Real repair closes running launcher and verifies new visible launcher
         shell: pwsh
         run: |
           $ErrorActionPreference='Stop'
-          $root=Join-Path $env:WORK 'running-root';Expand-Archive $env:BASE_ZIP $root -Force
-          foreach($d in @('storage','data','instances','runtimes')){New-Item -ItemType Directory -Force (Join-Path $root $d)|Out-Null;"KEEP-$d"|Set-Content (Join-Path $root "$d\keep.txt") -Encoding ascii}
-          $old=Start-Process (Join-Path $root 'SyntexLauncher.exe') -WorkingDirectory $root -PassThru;Start-Sleep -Seconds 3
-          if($old.HasExited){throw "old launcher exited too early $($old.ExitCode)"};$oldPid=$old.Id
-          $setup=Start-Process $env:FINAL_SETUP -ArgumentList @('--ci-install',"`"$root`"") -PassThru -Wait
-          if($setup.ExitCode -ne 0){$startup=Join-Path $root 'storage\logs\launcher-startup';if(Test-Path $startup){Get-ChildItem $startup -File|ForEach-Object{Get-Content $_.FullName -Raw}};throw "setup exit $($setup.ExitCode)"}
-          if(Get-Process -Id $oldPid -ErrorAction SilentlyContinue){throw 'pre-existing launcher survived setup'}
-          foreach($d in @('storage','data','instances','runtimes')){if((Get-Content (Join-Path $root "$d\keep.txt") -Raw).Trim() -ne "KEEP-$d"){throw "changed $d"}}
-          $startup=Join-Path $root 'storage\logs\launcher-startup';$latest=Get-ChildItem $startup -File|Sort-Object LastWriteTimeUtc -Descending|Select-Object -First 1;$text=Get-Content $latest.FullName -Raw;Write-Host $text
-          if(-not $text.Contains('Startprüfung erfolgreich: sichtbares Launcher-Fenster erkannt.')){throw 'real healthcheck did not see window'}
-          Get-Process SyntexLauncher -ErrorAction SilentlyContinue|Stop-Process -Force -ErrorAction SilentlyContinue
-          Write-Host 'SETUP_TERMINATES_EXISTING_AND_REAL_HEALTHCHECK_PASS'
+          $root=Join-Path $env:WORK 'running-root'
+          Expand-Archive $env:BASE_ZIP $root -Force
+          foreach($d in @('storage','data','instances','runtimes')){
+            New-Item -ItemType Directory -Force (Join-Path $root $d)|Out-Null
+            "KEEP-$d"|Set-Content (Join-Path $root "$d\keep.txt") -Encoding ascii
+          }
+          $old=Start-Process (Join-Path $root 'SyntexLauncher.exe') -WorkingDirectory $root -PassThru
+          Start-Sleep -Seconds 3
+          if($old.HasExited){throw "old launcher exited too early: $($old.ExitCode)"}
+          $oldPid=$old.Id
+          Write-Host "OLD_PID=$oldPid"
 
-      - name: Upload fixed candidate
+          $setup=Start-Process $env:FINAL_SETUP -ArgumentList @('--ci-install',"`"$root`"") -PassThru -Wait
+          if($setup.ExitCode-ne0){
+            Get-ChildItem (Join-Path $root 'storage\logs') -Recurse -File -ErrorAction SilentlyContinue|ForEach-Object{
+              Write-Host "--- $($_.FullName) ---"
+              Get-Content $_.FullName -Raw|Write-Host
+            }
+            throw "fixed setup exit $($setup.ExitCode)"
+          }
+
+          if(Get-Process -Id $oldPid -ErrorAction SilentlyContinue){throw 'pre-existing host survived setup'}
+          foreach($d in @('storage','data','instances','runtimes')){
+            if((Get-Content (Join-Path $root "$d\keep.txt") -Raw).Trim() -ne "KEEP-$d"){throw "setup changed $d"}
+          }
+          $startup=Join-Path $root 'storage\logs\launcher-startup'
+          $latest=Get-ChildItem $startup -File|Sort-Object LastWriteTimeUtc -Descending|Select-Object -First 1
+          $text=Get-Content $latest.FullName -Raw
+          Write-Host $text
+          if(-not $text.Contains('Startprüfung erfolgreich: sichtbares Launcher-Fenster erkannt.')){throw 'visible launcher marker missing'}
+          Get-Process SyntexLauncher -ErrorAction SilentlyContinue|Stop-Process -Force -ErrorAction SilentlyContinue
+          Write-Host 'SETUP_RUNNING_LAUNCHER_AUTO_CLOSE_VISIBLE_START_PASS'
+
+      - name: Upload verified candidate
         uses: actions/upload-artifact@v4
         with:
-          name: SyntexSetup-0.16.7-x64-process-healthcheck-fix-v2
-          path: |
-            ${{ env.FINAL_SETUP }}
-            rc-src/Setup.cpp
+          name: SyntexSetup-0.16.7-x64-process-fix-verified
+          path: ${{ env.FINAL_SETUP }}
           if-no-files-found: error
           retention-days: 7
