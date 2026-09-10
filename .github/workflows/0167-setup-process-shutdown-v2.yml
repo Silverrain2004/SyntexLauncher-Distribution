@@ -78,7 +78,7 @@ jobs:
           if([BitConverter]::ToUInt16($b,$lf+4)-ne0x8664){throw 'Setup is not AMD64'}
           Write-Host 'SETUP_PROCESS_SHUTDOWN_X64_SELFTEST_PASS'
 
-      - name: Real repair closes running launcher and verifies visible restart
+      - name: Setup itself terminates running launcher
         shell: pwsh
         run: |
           $ErrorActionPreference='Stop'
@@ -92,13 +92,22 @@ jobs:
           Start-Sleep -Seconds 3
           if($old.HasExited){throw "old launcher exited too early: $($old.ExitCode)"}
           $oldPid=$old.Id
-          Write-Host "OLD_PID=$oldPid"
+          $stop=Start-Process $env:FINAL_SETUP -ArgumentList @('--ci-stop-launcher',"`"$root`"") -PassThru -Wait
+          if($stop.ExitCode-ne0){throw "setup shutdown exit $($stop.ExitCode)"}
+          if(Get-Process -Id $oldPid -ErrorAction SilentlyContinue){throw 'pre-existing launcher survived setup shutdown'}
+          Write-Host 'SETUP_OWN_PROCESS_SHUTDOWN_PASS'
+          "TEST_ROOT=$root"|Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Repair after shutdown and verify visible restart
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $root=$env:TEST_ROOT
           $setup=Start-Process $env:FINAL_SETUP -ArgumentList @('--ci-install',"`"$root`"") -PassThru -Wait
           if($setup.ExitCode-ne0){
             Get-ChildItem (Join-Path $root 'storage\logs') -Recurse -File -ErrorAction SilentlyContinue|ForEach-Object{Write-Host "--- $($_.FullName) ---";Get-Content $_.FullName -Raw|Write-Host}
             throw "setup exit $($setup.ExitCode)"
           }
-          if(Get-Process -Id $oldPid -ErrorAction SilentlyContinue){throw 'pre-existing host survived setup'}
           foreach($d in @('storage','data','instances','runtimes')){
             if((Get-Content (Join-Path $root "$d\keep.txt") -Raw).Trim() -ne "KEEP-$d"){throw "setup changed $d"}
           }
@@ -108,7 +117,7 @@ jobs:
           Write-Host $text
           if(-not $text.Contains('Startprüfung erfolgreich: sichtbares Launcher-Fenster erkannt.')){throw 'visible launcher marker missing'}
           Get-Process SyntexLauncher -ErrorAction SilentlyContinue|Stop-Process -Force -ErrorAction SilentlyContinue
-          Write-Host 'SETUP_RUNNING_LAUNCHER_AUTO_CLOSE_VISIBLE_START_PASS'
+          Write-Host 'SETUP_REPAIR_AFTER_SHUTDOWN_VISIBLE_START_PASS'
 
       - name: Upload candidate
         uses: actions/upload-artifact@v4
