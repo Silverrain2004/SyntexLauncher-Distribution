@@ -1,0 +1,104 @@
+name: Syntex 0.16.7 Setup Process Healthcheck Diagnostics
+
+on:
+  push:
+    branches: ['fix/0.16.7-setup-process-healthcheck']
+    paths:
+      - '.github/workflows/0167-setup-process-healthcheck-diagnostics.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    env:
+      GOOD_URL: https://github.com/Silverrain2004/SyntexLauncher-Distribution/releases/download/v0.16.7-ci-34467708548/SyntexLauncher-0.16.7-ci-win-x64.zip
+      GOOD_SHA: cc716db79bc5eb8cae80413aa2fe5cce519e05e3c2b12b9e11ae943c1780207f
+      GOOD_SIZE: 70090490
+      BASE_URL: https://github.com/Silverrain2004/SyntexLauncher-Distribution/releases/download/v0.16.6/SyntexLauncher-0.16.6-win-x64.zip
+      BASE_SHA: f34397dae9ca7986ef5d8f9183c6d4ee355126d2c9b913dea6eee561835ada74
+      BASE_SIZE: 69903997
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Prepare verified payloads and toolchain
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $work=Join-Path $env:RUNNER_TEMP 'setup-health-diag';New-Item -ItemType Directory -Force $work|Out-Null
+          function Get-Verified($url,$sha,$size,$name){$p=Join-Path $work $name;Invoke-WebRequest $url -OutFile $p -UseBasicParsing;if((Get-Item $p).Length-ne[int64]$size){throw "$name size"};if((Get-FileHash $p -Algorithm SHA256).Hash.ToLowerInvariant()-ne$sha){throw "$name hash"};$p}
+          $base=Get-Verified $env:BASE_URL $env:BASE_SHA $env:BASE_SIZE 'base.zip';$good=Get-Verified $env:GOOD_URL $env:GOOD_SHA $env:GOOD_SIZE 'good.zip'
+          $goodRoot=Join-Path $work 'good-payload';Expand-Archive $good $goodRoot -Force
+          $vswhere=Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe';$vs=&$vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath;if([string]::IsNullOrWhiteSpace($vs)){throw 'VC++ x64 missing'}
+          "WORK=$work"|Out-File $env:GITHUB_ENV -Encoding utf8 -Append;"BASE_ZIP=$base"|Out-File $env:GITHUB_ENV -Encoding utf8 -Append;"GOOD_ROOT=$goodRoot"|Out-File $env:GITHUB_ENV -Encoding utf8 -Append;"VSDEVCMD=$(Join-Path $vs 'Common7\Tools\VsDevCmd.bat')"|Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Build diagnostic Setup with process shutdown and post-update healthcheck
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $src=Get-Content .\rc-src\Setup.cpp -Raw
+          $src=$src.Replace('#include <windows.h>',"#include <windows.h>`r`n#include <tlhelp32.h>")
+          $anchor='static bool LaunchVerify(const fs::path& root, bool ciMode, std::wstring& error) {'
+          $helper=@'
+          static bool SetupPathInside(const fs::path& candidate, const fs::path& directory) {
+              std::error_code ec; auto v=fs::absolute(candidate,ec).lexically_normal().wstring(); if(ec)return false;
+              ec.clear(); auto p=fs::absolute(directory,ec).lexically_normal().wstring(); if(ec)return false;
+              while(!p.empty()&&(p.back()==L'\\'||p.back()==L'/'))p.pop_back(); p.push_back(L'\\');
+              return v.size()>=p.size() && _wcsnicmp(v.c_str(),p.c_str(),p.size())==0;
+          }
+          static void StopLauncherProgramProcesses(const fs::path& root) noexcept {
+              try {
+                  std::error_code ec; auto host=fs::absolute(root/L"SyntexLauncher.exe",ec).lexically_normal(); if(ec)return;
+                  ec.clear(); auto app=fs::absolute(root/L"app",ec).lexically_normal(); if(ec)return;
+                  HANDLE snap=CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS,0); if(snap==INVALID_HANDLE_VALUE)return;
+                  PROCESSENTRY32W e{};e.dwSize=sizeof(e);
+                  if(Process32FirstW(snap,&e)){do{if(!e.th32ProcessID||e.th32ProcessID==GetCurrentProcessId())continue;
+                      HANDLE p=OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION|PROCESS_TERMINATE|SYNCHRONIZE,FALSE,e.th32ProcessID);if(!p)continue;
+                      std::wstring image(32768,L'\0');DWORD n=(DWORD)image.size();bool own=false;
+                      if(QueryFullProcessImageNameW(p,0,image.data(),&n)&&n){image.resize(n);fs::path pp(image);own=_wcsicmp(pp.lexically_normal().c_str(),host.c_str())==0||SetupPathInside(pp,app);}
+                      if(own){TerminateProcess(p,206);WaitForSingleObject(p,5000);}CloseHandle(p);
+                  }while(Process32NextW(snap,&e));}CloseHandle(snap);
+              } catch(...) {}
+          }
+
+'@
+          if(-not $src.Contains($anchor)){throw 'anchor missing'};$src=$src.Replace($anchor,$helper+$anchor)
+          $old='const std::wstring command = Quote(host.wstring()) + (ciMode ? L" --ci-gui-self-test" : L"");';if(-not $src.Contains($old)){throw 'command anchor missing'};$src=$src.Replace($old,'const std::wstring command = Quote(host.wstring()) + L" --post-update-health-check";')
+          $old2='if (!ValidateWritableRoot(root, error)) { cleanup(); return false; }';if(-not $src.Contains($old2)){throw 'root anchor missing'};$src=$src.Replace($old2,$old2+"`r`n    StopLauncherProgramProcesses(root);`r`n    Sleep(1000);")
+          $tmp=Join-Path $env:RUNNER_TEMP 'Setup-diag.cpp';Set-Content $tmp $src -Encoding utf8
+          @('#pragma once',("static constexpr wchar_t PAYLOAD_URL[] = L`"{0}`";" -f $env:GOOD_URL),("static constexpr wchar_t PAYLOAD_SHA256[] = L`"{0}`";" -f $env:GOOD_SHA),("static constexpr unsigned long long PAYLOAD_SIZE = {0}ULL;" -f $env:GOOD_SIZE))|Set-Content .\rc-src\PayloadContract.h -Encoding utf8
+          $out=Join-Path $env:WORK 'Setup-diag.exe';$cmd=Join-Path $env:RUNNER_TEMP 'build-diag.cmd';@('@echo on',"call `"$env:VSDEVCMD`" -arch=x64 -host_arch=x64",'if errorlevel 1 exit /b %errorlevel%',"cl.exe /nologo /DNOMINMAX /utf-8 /std:c++20 /EHsc /W4 /O2 /MT /I`"$env:GITHUB_WORKSPACE\rc-src`" `"$tmp`" /Fe:`"$out`" /link /SUBSYSTEM:WINDOWS /MACHINE:X64 winhttp.lib bcrypt.lib shell32.lib ole32.lib user32.lib gdi32.lib advapi32.lib comctl32.lib uxtheme.lib",'exit /b %errorlevel%')|Set-Content $cmd -Encoding ascii;&cmd.exe /d /c $cmd;if($LASTEXITCODE){throw 'build failed'};"SETUP=$out"|Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Control - repaired payload starts when launcher was closed
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Continue'
+          $root=Join-Path $env:WORK 'closed-root';Expand-Archive $env:BASE_ZIP $root -Force
+          $p=Start-Process $env:SETUP -ArgumentList @('--ci-install',"`"$root`"") -PassThru -Wait
+          Write-Host "CLOSED_SETUP_EXIT=$($p.ExitCode)"
+          Get-ChildItem (Join-Path $root 'storage\logs') -Recurse -File -ErrorAction SilentlyContinue|ForEach-Object{Write-Host "--- $($_.FullName)";Get-Content $_.FullName -Raw}
+          if($p.ExitCode-ne0){throw "closed control failed $($p.ExitCode)"}
+          Get-Process SyntexLauncher -ErrorAction SilentlyContinue|Stop-Process -Force -ErrorAction SilentlyContinue
+          Write-Host 'CLOSED_LAUNCHER_REPAIR_PASS'
+
+      - name: Diagnostic - running launcher shutdown then repair
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Continue'
+          $root=Join-Path $env:WORK 'running-root';Expand-Archive $env:BASE_ZIP $root -Force
+          $old=Start-Process (Join-Path $root 'SyntexLauncher.exe') -WorkingDirectory $root -PassThru;Start-Sleep -Seconds 3;$oldPid=$old.Id;Write-Host "OLD_PID=$oldPid OLD_EXITED=$($old.HasExited)"
+          Get-CimInstance Win32_Process|Where-Object{$_.ExecutablePath -and $_.ExecutablePath.StartsWith($root,[StringComparison]::OrdinalIgnoreCase)}|ForEach-Object{Write-Host "BEFORE PID=$($_.ProcessId) PATH=$($_.ExecutablePath)"}
+          $setup=Start-Process $env:SETUP -ArgumentList @('--ci-install',"`"$root`"") -PassThru
+          Start-Sleep -Seconds 8
+          Write-Host "AFTER8 OLD_ALIVE=$([bool](Get-Process -Id $oldPid -ErrorAction SilentlyContinue)) SETUP_EXITED=$($setup.HasExited)"
+          Get-CimInstance Win32_Process|Where-Object{$_.ExecutablePath -and $_.ExecutablePath.StartsWith($root,[StringComparison]::OrdinalIgnoreCase)}|ForEach-Object{Write-Host "AFTER8 PID=$($_.ProcessId) PATH=$($_.ExecutablePath) CMD=$($_.CommandLine)"}
+          if(-not $setup.HasExited){$null=$setup.WaitForExit(140000)}
+          Write-Host "RUNNING_SETUP_EXIT=$($setup.ExitCode)"
+          Get-CimInstance Win32_Process|Where-Object{$_.ExecutablePath -and $_.ExecutablePath.StartsWith($root,[StringComparison]::OrdinalIgnoreCase)}|ForEach-Object{Write-Host "FINAL PID=$($_.ProcessId) PATH=$($_.ExecutablePath) CMD=$($_.CommandLine)"}
+          Get-ChildItem (Join-Path $root 'storage\logs') -Recurse -File -ErrorAction SilentlyContinue|ForEach-Object{Write-Host "--- $($_.FullName)";Get-Content $_.FullName -Raw}
+          Get-Process SyntexLauncher -ErrorAction SilentlyContinue|Stop-Process -Force -ErrorAction SilentlyContinue
+          if($setup.ExitCode-ne0){throw "running repair failed $($setup.ExitCode)"}
+          Write-Host 'RUNNING_LAUNCHER_SHUTDOWN_REPAIR_PASS'
