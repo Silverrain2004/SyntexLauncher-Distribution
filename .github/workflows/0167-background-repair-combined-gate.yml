@@ -1,0 +1,271 @@
+name: Syntex 0.16.7 Background Repair Combined Gate
+
+on:
+  push:
+    branches: ['fix/0.16.7-setup-process-shutdown-v2']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: windows-latest
+    timeout-minutes: 25
+    env:
+      BASE_URL: https://github.com/Silverrain2004/SyntexLauncher-Distribution/releases/download/v0.16.6/SyntexLauncher-0.16.6-win-x64.zip
+      BASE_SHA: f34397dae9ca7986ef5d8f9183c6d4ee355126d2c9b913dea6eee561835ada74
+      BASE_SIZE: 69903997
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.400'
+
+      - name: Prepare immutable baseline and test roots
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $work=Join-Path $env:RUNNER_TEMP 'background-repair-combined'
+          $base=Join-Path $work 'base.zip'
+          $candidate=Join-Path $work 'candidate'
+          $root=Join-Path $work 'installed-root'
+          $dist=Join-Path $work 'dist'
+          New-Item -ItemType Directory -Force $work,$candidate,$root,$dist|Out-Null
+          Invoke-WebRequest $env:BASE_URL -OutFile $base -UseBasicParsing
+          if((Get-Item $base).Length -ne [int64]$env:BASE_SIZE){throw 'Immutable 0.16.6 size changed'}
+          $sha=(Get-FileHash $base -Algorithm SHA256).Hash.ToLowerInvariant()
+          if($sha -ne $env:BASE_SHA){throw "Immutable 0.16.6 hash changed: $sha"}
+          Expand-Archive $base $candidate -Force
+          Expand-Archive $base $root -Force
+          "WORK=$work"|Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          "BASE_ZIP=$base"|Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          "CANDIDATE=$candidate"|Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          "ROOT=$root"|Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          "DIST=$dist"|Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          Write-Host 'IMMUTABLE_0166_BASELINE_PASS'
+
+      - name: Apply managed Background startup patch
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $patchDir=Join-Path $env:RUNNER_TEMP 'managed-startup-background'
+          New-Item -ItemType Directory -Force $patchDir|Out-Null
+          Copy-Item .\rc-src\PatchManagedStartup.cs (Join-Path $patchDir 'Program.cs')
+          @'
+          <Project Sdk="Microsoft.NET.Sdk">
+            <PropertyGroup>
+              <OutputType>Exe</OutputType>
+              <TargetFramework>net10.0</TargetFramework>
+              <ImplicitUsings>enable</ImplicitUsings>
+              <Nullable>enable</Nullable>
+            </PropertyGroup>
+            <ItemGroup>
+              <PackageReference Include="Mono.Cecil" Version="0.11.6" />
+            </ItemGroup>
+          </Project>
+          '@|Set-Content (Join-Path $patchDir 'Patcher.csproj') -Encoding utf8
+          $output=dotnet run --project (Join-Path $patchDir 'Patcher.csproj') -c Release -- (Join-Path $env:CANDIDATE 'app')
+          $output|Write-Host
+          if($LASTEXITCODE-ne0){throw "Managed startup patch failed: $LASTEXITCODE"}
+          if(($output -join "`n") -notmatch 'PRIORITY=BACKGROUND'){throw 'Background dispatcher patch marker missing'}
+          Write-Host 'MANAGED_STARTUP_BACKGROUND_PASS'
+
+      - name: Locate Visual C++ x64 toolchain
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $vswhere=Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+          $vs=&$vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if([string]::IsNullOrWhiteSpace($vs)){throw 'VC++ x64 tools missing'}
+          "VSDEVCMD=$(Join-Path $vs 'Common7\Tools\VsDevCmd.bat')"|Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Build native x64 host and update agent
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $cmd=Join-Path $env:RUNNER_TEMP 'build-native-combined.cmd'
+          @(
+            '@echo on',
+            "call `"$env:VSDEVCMD`" -arch=x64 -host_arch=x64",
+            'if errorlevel 1 exit /b %errorlevel%',
+            "cl.exe /nologo /DNOMINMAX /utf-8 /std:c++20 /EHsc /W4 /O1 /Os /GL /MT `"$env:GITHUB_WORKSPACE\rc-src\LauncherHost.cpp`" /Fe:`"$env:CANDIDATE\SyntexLauncher.exe`" /link /SUBSYSTEM:WINDOWS /MACHINE:X64 /LTCG /OPT:REF /OPT:ICF winhttp.lib bcrypt.lib shell32.lib user32.lib",
+            'if errorlevel 1 exit /b %errorlevel%',
+            "cl.exe /nologo /DNOMINMAX /utf-8 /std:c++20 /EHsc /W4 /O1 /Os /GL /MT `"$env:GITHUB_WORKSPACE\rc-src\UpdateAgent.cpp`" /Fe:`"$env:CANDIDATE\app\SyntexUpdateAgent.exe`" /link /SUBSYSTEM:WINDOWS /MACHINE:X64 /LTCG /OPT:REF /OPT:ICF shell32.lib user32.lib",
+            'exit /b %errorlevel%'
+          )|Set-Content $cmd -Encoding ascii
+          &cmd.exe /d /c $cmd
+          if($LASTEXITCODE-ne0){throw "Native build failed: $LASTEXITCODE"}
+          Write-Host 'NATIVE_X64_BUILD_PASS'
+
+      - name: Package good and deliberately bad candidates
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $goodZip=Join-Path $env:DIST 'SyntexLauncher-0.16.7-background-good.zip'
+          Push-Location $env:CANDIDATE
+          try{&7z a -tzip -mx=1 -y $goodZip '.\*'|Out-Host}finally{Pop-Location}
+          if($LASTEXITCODE-ne0){throw "Good ZIP failed: $LASTEXITCODE"}
+          $goodSha=(Get-FileHash $goodZip -Algorithm SHA256).Hash.ToLowerInvariant()
+          $goodSize=(Get-Item $goodZip).Length
+
+          $badDir=Join-Path $env:WORK 'candidate-bad'
+          New-Item -ItemType Directory -Force $badDir|Out-Null
+          Copy-Item (Join-Path $env:CANDIDATE '*') $badDir -Recurse -Force
+          Copy-Item (Join-Path $env:CANDIDATE 'app\SyntexUpdateAgent.exe') (Join-Path $badDir 'SyntexLauncher.exe') -Force
+          $badZip=Join-Path $env:DIST 'SyntexLauncher-0.16.7-background-bad.zip'
+          Push-Location $badDir
+          try{&7z a -tzip -mx=1 -y $badZip '.\*'|Out-Host}finally{Pop-Location}
+          if($LASTEXITCODE-ne0){throw "Bad ZIP failed: $LASTEXITCODE"}
+          $badSha=(Get-FileHash $badZip -Algorithm SHA256).Hash.ToLowerInvariant()
+          $badSize=(Get-Item $badZip).Length
+
+          "GOOD_ZIP=$goodZip"|Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          "GOOD_SHA=$goodSha"|Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          "GOOD_SIZE=$goodSize"|Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          "BAD_ZIP=$badZip"|Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          "BAD_SHA=$badSha"|Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          "BAD_SIZE=$badSize"|Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          Write-Host "GOOD_PAYLOAD_SHA=$goodSha SIZE=$goodSize"
+          Write-Host "BAD_PAYLOAD_SHA=$badSha SIZE=$badSize"
+
+      - name: Patch Setup for exact-root graceful shutdown
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          ./scripts/Patch-SetupProcessShutdown.ps1 -SetupSource ./rc-src/Setup.cpp
+          ./scripts/Patch-SetupGracefulShutdown.ps1 -SetupSource ./rc-src/Setup.cpp
+          Write-Host 'SETUP_EXACT_ROOT_GRACEFUL_SHUTDOWN_PASS'
+
+      - name: Build good and bad x64 Setup binaries
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          function Write-Contract([string]$sha,[Int64]$size){
+            @(
+              '#pragma once',
+              'static constexpr wchar_t PAYLOAD_URL[] = L"https://ci.invalid/syntex-0.16.7.zip";',
+              ("static constexpr wchar_t PAYLOAD_SHA256[] = L`"{0}`";" -f $sha),
+              ("static constexpr unsigned long long PAYLOAD_SIZE = {0}ULL;" -f $size)
+            )|Set-Content ./rc-src/PayloadContract.h -Encoding utf8
+          }
+          function Build-Setup([string]$out){
+            $cmd=Join-Path $env:RUNNER_TEMP (([IO.Path]::GetFileNameWithoutExtension($out))+'.cmd')
+            @(
+              '@echo on',
+              "call `"$env:VSDEVCMD`" -arch=x64 -host_arch=x64",
+              'if errorlevel 1 exit /b %errorlevel%',
+              "cl.exe /nologo /DNOMINMAX /utf-8 /std:c++20 /EHsc /W4 /O2 /MT /I`"$env:GITHUB_WORKSPACE\rc-src`" `"$env:GITHUB_WORKSPACE\rc-src\Setup.cpp`" /Fe:`"$out`" /link /SUBSYSTEM:WINDOWS /MACHINE:X64 winhttp.lib bcrypt.lib shell32.lib ole32.lib user32.lib gdi32.lib advapi32.lib comctl32.lib uxtheme.lib",
+              'exit /b %errorlevel%'
+            )|Set-Content $cmd -Encoding ascii
+            &cmd.exe /d /c $cmd
+            if($LASTEXITCODE-ne0){throw "Setup build failed: $LASTEXITCODE"}
+          }
+          $goodSetup=Join-Path $env:DIST 'SyntexSetup-0.16.7-background-GOOD.exe'
+          Write-Contract $env:GOOD_SHA ([Int64]$env:GOOD_SIZE)
+          Build-Setup $goodSetup
+          $badSetup=Join-Path $env:DIST 'SyntexSetup-0.16.7-background-BAD.exe'
+          Write-Contract $env:BAD_SHA ([Int64]$env:BAD_SIZE)
+          Build-Setup $badSetup
+          "GOOD_SETUP=$goodSetup"|Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          "BAD_SETUP=$badSetup"|Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Verify Setup selftests and AMD64
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          foreach($arg in @('--self-test','--repair-self-test','--log-self-test')){
+            $p=Start-Process $env:GOOD_SETUP -ArgumentList $arg -PassThru -Wait
+            if($p.ExitCode-ne0){throw "$arg failed: $($p.ExitCode)"}
+          }
+          foreach($exe in @($env:GOOD_SETUP,$env:BAD_SETUP)){
+            $b=[IO.File]::ReadAllBytes($exe)
+            if($b[0]-ne0x4d-or$b[1]-ne0x5a){throw "MZ missing: $exe"}
+            $lf=[BitConverter]::ToInt32($b,0x3c)
+            if([BitConverter]::ToUInt16($b,$lf+4)-ne0x8664){throw "Not AMD64: $exe"}
+          }
+          Write-Host 'SETUP_SELFTEST_AMD64_PASS'
+
+      - name: Repair running 0.16.6 and verify visible 0.16.7
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          foreach($d in @('storage','data','instances','runtimes')){
+            New-Item -ItemType Directory -Force (Join-Path $env:ROOT $d)|Out-Null
+            "KEEP-$d"|Set-Content (Join-Path $env:ROOT "$d\keep.txt") -Encoding ascii
+          }
+          $old=Start-Process (Join-Path $env:ROOT 'SyntexLauncher.exe') -WorkingDirectory $env:ROOT -PassThru
+          Start-Sleep -Seconds 3
+          if($old.HasExited){throw "0.16.6 exited before repair: $($old.ExitCode)"}
+          $oldPid=$old.Id
+          $setup=Start-Process $env:GOOD_SETUP -ArgumentList @('--ci-install-local',"`"$env:ROOT`"","`"$env:GOOD_ZIP`"") -PassThru
+          if(-not $setup.WaitForExit(180000)){try{$setup.Kill($true)}catch{};throw 'First repair timed out'}
+          if($setup.ExitCode-ne0){
+            Get-ChildItem (Join-Path $env:ROOT 'storage\logs') -Recurse -File -ErrorAction SilentlyContinue|ForEach-Object{Write-Host "--- $($_.FullName) ---";Get-Content $_.FullName -Raw|Write-Host}
+            throw "First repair failed: $($setup.ExitCode)"
+          }
+          if(Get-Process -Id $oldPid -ErrorAction SilentlyContinue){throw 'Original 0.16.6 host survived repair'}
+          foreach($d in @('storage','data','instances','runtimes')){
+            if((Get-Content (Join-Path $env:ROOT "$d\keep.txt") -Raw).Trim()-ne"KEEP-$d"){throw "First repair changed $d"}
+          }
+          $text=(Get-ChildItem (Join-Path $env:ROOT 'storage\logs\launcher-startup') -File|ForEach-Object{Get-Content $_.FullName -Raw})-join"`n"
+          if($text-notmatch'Startprüfung erfolgreich: sichtbares Launcher-Fenster erkannt'){throw 'First repair visible restart marker missing'}
+          Write-Host 'RUNNING_0166_TO_VISIBLE_0167_REPAIR_PASS'
+
+      - name: Repair again while 0.16.7 is already running
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $before=(Get-ChildItem (Join-Path $env:ROOT 'storage\logs\launcher-startup') -File -ErrorAction SilentlyContinue).Count
+          $setup=Start-Process $env:GOOD_SETUP -ArgumentList @('--ci-install-local',"`"$env:ROOT`"","`"$env:GOOD_ZIP`"") -PassThru
+          if(-not $setup.WaitForExit(180000)){try{$setup.Kill($true)}catch{};throw 'Second repair timed out'}
+          if($setup.ExitCode-ne0){
+            Get-ChildItem (Join-Path $env:ROOT 'storage\logs') -Recurse -File -ErrorAction SilentlyContinue|ForEach-Object{Write-Host "--- $($_.FullName) ---";Get-Content $_.FullName -Raw|Write-Host}
+            throw "Second repair failed: $($setup.ExitCode)"
+          }
+          $after=(Get-ChildItem (Join-Path $env:ROOT 'storage\logs\launcher-startup') -File -ErrorAction SilentlyContinue).Count
+          if($after-le$before){throw 'Second repair produced no new startup health log'}
+          foreach($d in @('storage','data','instances','runtimes')){
+            if((Get-Content (Join-Path $env:ROOT "$d\keep.txt") -Raw).Trim()-ne"KEEP-$d"){throw "Second repair changed $d"}
+          }
+          Write-Host 'RUNNING_0167_SECOND_REPAIR_VISIBLE_RESTART_PASS'
+
+      - name: Deliberate bad repair must rollback to working launcher
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $goodHost=Join-Path $env:ROOT 'SyntexLauncher.exe'
+          $beforeHash=(Get-FileHash $goodHost -Algorithm SHA256).Hash.ToLowerInvariant()
+          $bad=Start-Process $env:BAD_SETUP -ArgumentList @('--ci-install-local',"`"$env:ROOT`"","`"$env:BAD_ZIP`"") -PassThru
+          if(-not $bad.WaitForExit(180000)){try{$bad.Kill($true)}catch{};throw 'Bad repair timed out instead of rolling back'}
+          if($bad.ExitCode-eq0){throw 'Deliberately bad repair unexpectedly succeeded'}
+          $afterHash=(Get-FileHash $goodHost -Algorithm SHA256).Hash.ToLowerInvariant()
+          if($afterHash-ne$beforeHash){throw "Rollback did not restore good host: $beforeHash -> $afterHash"}
+          foreach($d in @('storage','data','instances','runtimes')){
+            if((Get-Content (Join-Path $env:ROOT "$d\keep.txt") -Raw).Trim()-ne"KEEP-$d"){throw "Rollback changed $d"}
+          }
+          $health=Start-Process $goodHost -ArgumentList '--ci-gui-self-test' -WorkingDirectory $env:ROOT -PassThru
+          if(-not $health.WaitForExit(60000)){try{$health.Kill($true)}catch{};throw 'Restored launcher health test timed out'}
+          if($health.ExitCode-ne0){throw "Restored launcher did not show a window: $($health.ExitCode)"}
+          Write-Host 'FAILED_REPAIR_ROLLBACK_VISIBLE_START_USER_DATA_PASS'
+
+      - name: Reverify immutable v0.16.6 asset
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          if((Get-Item $env:BASE_ZIP).Length-ne[int64]$env:BASE_SIZE){throw 'Cached 0.16.6 size changed'}
+          $sha=(Get-FileHash $env:BASE_ZIP -Algorithm SHA256).Hash.ToLowerInvariant()
+          if($sha-ne$env:BASE_SHA){throw 'Cached 0.16.6 hash changed'}
+          Write-Host 'IMMUTABLE_0166_RECHECK_PASS'
+          Write-Host 'BACKGROUND_REPAIR_COMBINED_GATE_PASS'
+
+      - name: Upload verified local-gate artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: Syntex-0.16.7-background-repair-combined-gate
+          path: |
+            ${{ env.GOOD_SETUP }}
+            ${{ env.GOOD_ZIP }}
+          if-no-files-found: error
+          retention-days: 7
