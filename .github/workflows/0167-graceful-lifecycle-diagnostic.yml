@@ -1,0 +1,138 @@
+name: Syntex 0.16.7 Graceful Lifecycle Diagnostic
+
+on:
+  push:
+    branches:
+      - fix/0.16.7-setup-process-shutdown-v2
+    paths:
+      - '.github/workflows/0167-graceful-lifecycle-diagnostic.yml'
+      - 'rc-src/LauncherHost.cpp'
+      - 'rc-src/PatchManagedStartup.cs'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    runs-on: windows-2025
+    timeout-minutes: 15
+    env:
+      BASE_URL: https://github.com/Silverrain2004/SyntexLauncher-Distribution/releases/download/v0.16.6/SyntexLauncher-0.16.6-win-x64.zip
+      BASE_SHA: f34397dae9ca7986ef5d8f9183c6d4ee355126d2c9b913dea6eee561835ada74
+      BASE_SIZE: '69903997'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.400
+
+      - name: Prepare immutable candidate base
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $work=Join-Path $env:RUNNER_TEMP 'graceful-lifecycle'
+          $zip=Join-Path $work 'base.zip'
+          $candidate=Join-Path $work 'candidate'
+          New-Item -ItemType Directory -Force $work,$candidate|Out-Null
+          Invoke-WebRequest $env:BASE_URL -OutFile $zip -UseBasicParsing
+          if((Get-Item $zip).Length -ne [int64]$env:BASE_SIZE){throw 'immutable 0.16.6 size changed'}
+          if((Get-FileHash $zip -Algorithm SHA256).Hash.ToLowerInvariant() -ne $env:BASE_SHA){throw 'immutable 0.16.6 hash changed'}
+          Expand-Archive $zip $candidate -Force
+          "CANDIDATE=$candidate"|Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          Write-Host 'IMMUTABLE_0166_BASELINE_PASS'
+
+      - name: Patch managed startup and build 0.16.7 host
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $patchDir=Join-Path $env:RUNNER_TEMP 'patcher'
+          New-Item -ItemType Directory -Force $patchDir|Out-Null
+          Copy-Item .\rc-src\PatchManagedStartup.cs (Join-Path $patchDir 'Program.cs')
+          @'
+          <Project Sdk="Microsoft.NET.Sdk">
+            <PropertyGroup><OutputType>Exe</OutputType><TargetFramework>net10.0</TargetFramework><ImplicitUsings>enable</ImplicitUsings><Nullable>enable</Nullable></PropertyGroup>
+            <ItemGroup><PackageReference Include="Mono.Cecil" Version="0.11.6" /></ItemGroup>
+          </Project>
+          '@|Set-Content (Join-Path $patchDir 'Patcher.csproj') -Encoding utf8
+          $o=dotnet run --project (Join-Path $patchDir 'Patcher.csproj') -c Release -- (Join-Path $env:CANDIDATE 'app')
+          $o|Write-Host
+          if($LASTEXITCODE-ne0-or($o-join"`n")-notmatch'PATCH_OK_AVALONIA_DISPATCHER:'){throw 'managed startup patch failed'}
+
+          $vswhere=Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+          $vs=&$vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if([string]::IsNullOrWhiteSpace($vs)){throw 'VC++ x64 tools missing'}
+          $dev=Join-Path $vs 'Common7\Tools\VsDevCmd.bat'
+          $cmd=Join-Path $env:RUNNER_TEMP 'build-host.cmd'
+          @(
+            '@echo on',
+            "call `"$dev`" -arch=x64 -host_arch=x64",
+            'if errorlevel 1 exit /b %errorlevel%',
+            "cl.exe /nologo /DNOMINMAX /utf-8 /std:c++20 /EHsc /W4 /O1 /Os /GL /MT `"$env:GITHUB_WORKSPACE\rc-src\LauncherHost.cpp`" /Fe:`"$env:CANDIDATE\SyntexLauncher.exe`" /link /SUBSYSTEM:WINDOWS /MACHINE:X64 /LTCG /OPT:REF /OPT:ICF winhttp.lib bcrypt.lib shell32.lib user32.lib",
+            'exit /b %errorlevel%'
+          )|Set-Content $cmd -Encoding ascii
+          &cmd.exe /d /c $cmd
+          if($LASTEXITCODE-ne0){throw "host build failed: $LASTEXITCODE"}
+          Write-Host 'GRACEFUL_LIFECYCLE_CANDIDATE_BUILD_PASS'
+
+      - name: Ten real health starts with graceful close
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $root=[IO.Path]::GetFullPath($env:CANDIDATE).TrimEnd('\')
+          $hostExe=Join-Path $root 'SyntexLauncher.exe'
+          $appPrefix=(Join-Path $root 'app')+'\'
+
+          function Get-OwnedSyntexProcesses {
+            @(Get-CimInstance Win32_Process | Where-Object {
+              if(-not $_.ExecutablePath){ return $false }
+              try { $p=[IO.Path]::GetFullPath($_.ExecutablePath) } catch { return $false }
+              ($p -ieq $hostExe) -or $p.StartsWith($appPrefix,[StringComparison]::OrdinalIgnoreCase)
+            })
+          }
+
+          for($i=1;$i-le10;$i++){
+            $before=Get-OwnedSyntexProcesses
+            if($before){
+              $before|ForEach-Object{Write-Host "UNEXPECTED_BEFORE_${i} PID=$($_.ProcessId) PATH=$($_.ExecutablePath)"}
+              throw "owned Syntex process remained before cycle $i"
+            }
+
+            $watch=Start-Process $hostExe -ArgumentList '--post-update-health-check' -WorkingDirectory $root -PassThru
+            if(-not $watch.WaitForExit(60000)){
+              try{$watch.Kill($true)}catch{}
+              throw "health watcher cycle $i timed out"
+            }
+            if($watch.ExitCode-ne0){
+              Get-ChildItem (Join-Path $root 'storage\logs\launcher-startup') -File -ErrorAction SilentlyContinue|ForEach-Object{Get-Content $_.FullName -Raw|Write-Host}
+              throw "health watcher cycle $i failed: $($watch.ExitCode)"
+            }
+
+            $deadline=(Get-Date).AddSeconds(5)
+            do{
+              $children=@(Get-OwnedSyntexProcesses|Where-Object{[IO.Path]::GetFullPath($_.ExecutablePath).StartsWith($appPrefix,[StringComparison]::OrdinalIgnoreCase)})
+              if($children){break}
+              Start-Sleep -Milliseconds 100
+            }while((Get-Date)-lt$deadline)
+            if(-not $children){throw "managed launcher child missing after health success in cycle $i"}
+
+            foreach($child in $children){
+              $proc=Get-Process -Id $child.ProcessId -ErrorAction Stop
+              $closed=$proc.CloseMainWindow()
+              Write-Host "GRACEFUL_CLOSE_SENT_${i} PID=$($child.ProcessId) RESULT=$closed"
+            }
+
+            $closeDeadline=(Get-Date).AddSeconds(15)
+            do{
+              Start-Sleep -Milliseconds 100
+              $left=Get-OwnedSyntexProcesses
+            }while($left-and(Get-Date)-lt$closeDeadline)
+
+            if($left){
+              $left|ForEach-Object{Write-Host "GRACEFUL_CLOSE_LEFT_${i} PID=$($_.ProcessId) PATH=$($_.ExecutablePath)"}
+              $left|ForEach-Object{Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue}
+              throw "launcher did not close gracefully in cycle $i"
+            }
+            Write-Host "REAL_HEALTH_GRACEFUL_LIFECYCLE_${i}_PASS"
+          }
+          Write-Host 'TEN_REAL_HEALTH_GRACEFUL_LIFECYCLES_PASS'
