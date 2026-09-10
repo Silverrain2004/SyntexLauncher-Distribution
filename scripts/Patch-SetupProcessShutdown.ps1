@@ -25,7 +25,6 @@ static std::vector<DWORD> OwnedLauncherProcessIds(const fs::path& root) {
     ec.clear();
     const auto app = fs::absolute(root / L"app", ec).lexically_normal();
     if (ec) return result;
-
     HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
     if (snapshot == INVALID_HANDLE_VALUE) return result;
     PROCESSENTRY32W entry{};
@@ -40,9 +39,7 @@ static std::vector<DWORD> OwnedLauncherProcessIds(const fs::path& root) {
             if (QueryFullProcessImageNameW(process, 0, image.data(), &imageLength) && imageLength > 0) {
                 image.resize(imageLength);
                 const fs::path processPath = fs::path(image).lexically_normal();
-                if (_wcsicmp(processPath.c_str(), host.c_str()) == 0 || IsPathInsideSetup(processPath, app)) {
-                    result.push_back(entry.th32ProcessID);
-                }
+                if (_wcsicmp(processPath.c_str(), host.c_str()) == 0 || IsPathInsideSetup(processPath, app)) result.push_back(entry.th32ProcessID);
             }
             CloseHandle(process);
         } while (Process32NextW(snapshot, &entry));
@@ -66,14 +63,12 @@ static bool StopLauncherProgramProcesses(const fs::path& root, std::wstring& err
     try {
         auto pids = OwnedLauncherProcessIds(root);
         if (pids.empty()) return true;
-
         for (const DWORD pid : pids) RequestCloseForPid(pid);
         const ULONGLONG gracefulDeadline = GetTickCount64() + 5000;
         while (GetTickCount64() < gracefulDeadline) {
             if (OwnedLauncherProcessIds(root).empty()) return true;
             Sleep(100);
         }
-
         const ULONGLONG hardDeadline = GetTickCount64() + 10000;
         while (GetTickCount64() < hardDeadline) {
             pids = OwnedLauncherProcessIds(root);
@@ -87,7 +82,6 @@ static bool StopLauncherProgramProcesses(const fs::path& root, std::wstring& err
             }
             Sleep(100);
         }
-
         if (!OwnedLauncherProcessIds(root).empty()) {
             error = L"Syntex Launcher konnte für Installation/Aktualisierung nicht vollständig beendet werden.";
             return false;
@@ -104,13 +98,16 @@ $s=$s.Replace($anchor,$helper+$anchor)
 $old='const std::wstring command = Quote(host.wstring()) + (ciMode ? L" --ci-gui-self-test" : L"");'
 if(-not $s.Contains($old)){throw 'LaunchVerify command anchor missing'}
 $s=$s.Replace($old,'const std::wstring command = Quote(host.wstring()) + L" --post-update-health-check";')
-$begin='progress(87, L"Vorhandene Programmdateien werden transaktional gesichert …");`r`n    if (!SyntexSetupRepair::Begin(root, stage, transaction, error)) { cleanup(); return false; }'
-if(-not $s.Contains($begin)){
-    $begin="progress(87, L`"Vorhandene Programmdateien werden transaktional gesichert …`" );`n    if (!SyntexSetupRepair::Begin(root, stage, transaction, error)) { cleanup(); return false; }"
-}
-if(-not $s.Contains($begin)){throw 'Repair transaction anchor missing'}
-$replacement="progress(86, L`"Laufender Syntex Launcher wird für Installation/Aktualisierung beendet …`" );`r`n    if (!StopLauncherProgramProcesses(root, error)) { cleanup(); return false; }`r`n`r`n    progress(87, L`"Vorhandene Programmdateien werden transaktional gesichert …`" );`r`n    if (!SyntexSetupRepair::Begin(root, stage, transaction, error)) { cleanup(); return false; }"
-$s=$s.Replace($begin,$replacement)
+$pattern='progress\(87, L"Vorhandene Programmdateien werden transaktional gesichert …"\);\s*if \(!SyntexSetupRepair::Begin\(root, stage, transaction, error\)\) \{ cleanup\(\); return false; \}'
+if(-not [regex]::IsMatch($s,$pattern)){throw 'Repair transaction anchor missing'}
+$replacement=@'
+progress(86, L"Laufender Syntex Launcher wird für Installation/Aktualisierung beendet …");
+    if (!StopLauncherProgramProcesses(root, error)) { cleanup(); return false; }
+
+    progress(87, L"Vorhandene Programmdateien werden transaktional gesichert …");
+    if (!SyntexSetupRepair::Begin(root, stage, transaction, error)) { cleanup(); return false; }
+'@
+$s=[regex]::Replace($s,$pattern,$replacement,1)
 $s=$s.Replace('Syntex Launcher Setup 0.16.6 RC1','Syntex Launcher Setup 0.16.7')
 $s=$s.Replace('Syntex Launcher Setup 0.16.6','Syntex Launcher Setup 0.16.7')
 $s=$s.Replace('SyntexLauncherSetup/0.16.6-RC1','SyntexLauncherSetup/0.16.7')
