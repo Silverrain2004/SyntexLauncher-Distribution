@@ -124,7 +124,7 @@ jobs:
           if($LASTEXITCODE-ne0){throw "Setup build failed: $LASTEXITCODE"}
           "SETUP_EXE=$setup"|Out-File $env:GITHUB_ENV -Encoding utf8 -Append
 
-      - name: Trace repair process and window lifecycle
+      - name: Trace repair process and full window lifecycle
         shell: pwsh
         run: |
           $ErrorActionPreference='Stop'
@@ -132,6 +132,38 @@ jobs:
             New-Item -ItemType Directory -Force (Join-Path $env:ROOT $d)|Out-Null
             "KEEP-$d"|Set-Content (Join-Path $env:ROOT "$d\keep.txt") -Encoding ascii
           }
+
+          Add-Type @'
+          using System;
+          using System.Collections.Generic;
+          using System.Runtime.InteropServices;
+          using System.Text;
+          public static class SyntexWindowTrace {
+              private delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
+              [DllImport("user32.dll")] private static extern bool EnumWindows(EnumWindowsProc cb, IntPtr lp);
+              [DllImport("user32.dll")] private static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint pid);
+              [DllImport("user32.dll")] private static extern bool IsWindowVisible(IntPtr hWnd);
+              [DllImport("user32.dll")] private static extern int GetWindowTextLengthW(IntPtr hWnd);
+              [DllImport("user32.dll", CharSet=CharSet.Unicode)] private static extern int GetWindowTextW(IntPtr hWnd, StringBuilder text, int count);
+              [DllImport("user32.dll", CharSet=CharSet.Unicode)] private static extern int GetClassNameW(IntPtr hWnd, StringBuilder text, int count);
+              [DllImport("user32.dll")] private static extern IntPtr GetWindow(IntPtr hWnd, uint command);
+              [DllImport("user32.dll")] private static extern bool IsHungAppWindow(IntPtr hWnd);
+              public static string Describe(int targetPid) {
+                  var rows = new List<string>();
+                  EnumWindows((h, lp) => {
+                      uint pid; GetWindowThreadProcessId(h, out pid);
+                      if (pid != (uint)targetPid) return true;
+                      var title = new StringBuilder(Math.Max(2, GetWindowTextLengthW(h) + 1));
+                      GetWindowTextW(h, title, title.Capacity);
+                      var cls = new StringBuilder(512); GetClassNameW(h, cls, cls.Capacity);
+                      var owner = GetWindow(h, 4);
+                      rows.Add($"HWND=0x{h.ToInt64():X};Visible={IsWindowVisible(h)};Hung={IsHungAppWindow(h)};Owner=0x{owner.ToInt64():X};Class={cls};Title={title}");
+                      return true;
+                  }, IntPtr.Zero);
+                  return rows.Count == 0 ? "<NO_TOP_LEVEL_WINDOWS>" : string.Join(" || ", rows);
+              }
+          }
+          '@
 
           function Get-ExactRootRows {
             $rootFull=[IO.Path]::GetFullPath($env:ROOT).TrimEnd('\')
@@ -145,39 +177,48 @@ jobs:
               if(($full -ieq $hostExe)-or$full.StartsWith($appPrefix,[StringComparison]::OrdinalIgnoreCase)){
                 $gp=Get-Process -Id $p.ProcessId -ErrorAction SilentlyContinue
                 $rows += [pscustomobject]@{
-                  PID=$p.ProcessId
-                  ParentPID=$p.ParentProcessId
+                  PID=[int]$p.ProcessId
+                  ParentPID=[int]$p.ParentProcessId
                   Path=$full
                   CommandLine=$p.CommandLine
-                  MainWindowHandle=if($gp){$gp.MainWindowHandle}else{0}
+                  MainWindowHandle=if($gp){('0x{0:X}' -f $gp.MainWindowHandle.ToInt64())}else{'0x0'}
                   MainWindowTitle=if($gp){$gp.MainWindowTitle}else{''}
                   Responding=if($gp){$gp.Responding}else{$false}
+                  ThreadCount=if($gp){$gp.Threads.Count}else{0}
+                  HandleCount=if($gp){$gp.HandleCount}else{0}
+                  CPU=if($gp){$gp.CPU}else{$null}
+                  WorkingSet64=if($gp){$gp.WorkingSet64}else{0}
+                  TopLevelWindows=[SyntexWindowTrace]::Describe([int]$p.ProcessId)
                 }
               }
             }
             return $rows
           }
 
+          function Write-ExactRootState([string]$label){
+            Write-Host "=== $label ==="
+            $rows=Get-ExactRootRows
+            if($rows.Count-eq0){Write-Host 'NO_EXACT_ROOT_PROCESSES';return}
+            foreach($row in $rows){$row|ConvertTo-Json -Depth 4 -Compress|Write-Host}
+          }
+
           $old=Start-Process (Join-Path $env:ROOT 'SyntexLauncher.exe') -WorkingDirectory $env:ROOT -PassThru
           Start-Sleep -Seconds 3
           Write-Host "TRACE_OLD_HOST_PID=$($old.Id)"
-          Get-ExactRootRows|Format-Table -AutoSize|Out-String|Write-Host
+          Write-ExactRootState 'BEFORE_SETUP'
 
           $setup=Start-Process $env:SETUP_EXE -ArgumentList @('--ci-install-local',"`"$env:ROOT`"","`"$env:GOOD_ZIP`"") -PassThru
           $started=[DateTime]::UtcNow
           $sample=0
           while(-not $setup.HasExited-and([DateTime]::UtcNow-$started).TotalSeconds-lt175){
             $sample++
-            Write-Host "=== TRACE SAMPLE $sample UTC=$([DateTime]::UtcNow.ToString('O')) SETUP_PID=$($setup.Id) ==="
-            $rows=Get-ExactRootRows
-            if($rows.Count-eq0){Write-Host 'NO_EXACT_ROOT_PROCESSES'}else{$rows|Format-Table -AutoSize|Out-String|Write-Host}
+            Write-ExactRootState "TRACE_SAMPLE_$sample UTC=$([DateTime]::UtcNow.ToString('O')) SETUP_PID=$($setup.Id)"
             Start-Sleep -Seconds 2
             $setup.Refresh()
           }
           if(-not $setup.HasExited){try{$setup.Kill($true)}catch{};"REPAIR_EXIT=999"|Out-File $env:GITHUB_ENV -Encoding utf8 -Append}else{"REPAIR_EXIT=$($setup.ExitCode)"|Out-File $env:GITHUB_ENV -Encoding utf8 -Append}
 
-          Write-Host '=== FINAL EXACT-ROOT PROCESS STATE ==='
-          Get-ExactRootRows|Format-Table -AutoSize|Out-String|Write-Host
+          Write-ExactRootState 'FINAL_EXACT_ROOT_PROCESS_STATE'
           Write-Host '=== STARTUP LOGS ==='
           Get-ChildItem (Join-Path $env:ROOT 'storage\logs\launcher-startup') -File -ErrorAction SilentlyContinue|Sort-Object LastWriteTime|ForEach-Object{Write-Host "--- $($_.Name) ---";Get-Content $_.FullName -Raw|Write-Host}
           Write-Host '=== MANAGED STARTUP LOGS ==='
