@@ -31,6 +31,9 @@ inline bool EqualName(const fs::path& path, const wchar_t* expected) {
 
 inline bool IsPreservedUserEntry(const fs::path& path) {
     static constexpr const wchar_t* preserved[] = {
+        // Current Syntex-owned persistent root. It may contain settings, accounts,
+        // logs and other player/creator state and must never be treated as program payload.
+        L"storage",
         L"data", L"instances", L"runtimes",
         L"cache", L"downloads", L"logs", L"creator", L"diagnostics", L"temp", L"updates", L"fehleranalysen",
         // Legacy/user-owned layouts that must never be discarded by an in-place setup repair.
@@ -188,6 +191,7 @@ inline bool RunFilesystemSelfTest() {
     fs::remove_all(base, ec);
 
     auto seedRoot = [&](const fs::path& root) {
+        fs::create_directories(root / L"storage" / L"data" / L"settings", ec);
         fs::create_directories(root / L"data" / L"settings", ec);
         fs::create_directories(root / L"instances" / L"world-a", ec);
         fs::create_directories(root / L"runtimes" / L"java-21", ec);
@@ -196,6 +200,7 @@ inline bool RunFilesystemSelfTest() {
         std::ofstream(root / L"SyntexLauncher.exe") << "old-launcher";
         std::ofstream(root / L"Old.Managed.dll") << "old-dll";
         std::ofstream(root / L"tools" / L"old-tool.bin") << "old-tool";
+        std::ofstream(root / L"storage" / L"data" / L"settings" / L"settings.json") << "keep-storage";
         std::ofstream(root / L"data" / L"settings" / L"settings.json") << "keep-data";
         std::ofstream(root / L"instances" / L"world-a" / L"level.dat") << "keep-instance";
         std::ofstream(root / L"runtimes" / L"java-21" / L"release") << "keep-runtime";
@@ -223,6 +228,7 @@ inline bool RunFilesystemSelfTest() {
         fs::exists(successRoot / L"app" / L"SyntexLauncher.App.exe") &&
         !fs::exists(successRoot / L"Old.Managed.dll") &&
         !fs::exists(successRoot / L"tools") &&
+        ReadSmallTextFile(successRoot / L"storage" / L"data" / L"settings" / L"settings.json") == "keep-storage" &&
         ReadSmallTextFile(successRoot / L"data" / L"settings" / L"settings.json") == "keep-data" &&
         ReadSmallTextFile(successRoot / L"instances" / L"world-a" / L"level.dat") == "keep-instance" &&
         ReadSmallTextFile(successRoot / L"runtimes" / L"java-21" / L"release") == "keep-runtime" &&
@@ -246,6 +252,7 @@ inline bool RunFilesystemSelfTest() {
         ReadSmallTextFile(rollbackRoot / L"Old.Managed.dll") == "old-dll" &&
         ReadSmallTextFile(rollbackRoot / L"tools" / L"old-tool.bin") == "old-tool" &&
         !fs::exists(rollbackRoot / L"app") &&
+        ReadSmallTextFile(rollbackRoot / L"storage" / L"data" / L"settings" / L"settings.json") == "keep-storage" &&
         ReadSmallTextFile(rollbackRoot / L"data" / L"settings" / L"settings.json") == "keep-data" &&
         ReadSmallTextFile(rollbackRoot / L"instances" / L"world-a" / L"level.dat") == "keep-instance" &&
         ReadSmallTextFile(rollbackRoot / L"runtimes" / L"java-21" / L"release") == "keep-runtime" &&
