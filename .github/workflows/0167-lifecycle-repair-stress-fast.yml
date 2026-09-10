@@ -1,0 +1,196 @@
+name: Syntex 0.16.7 Lifecycle Repair Stress Fast
+
+on:
+  push:
+    branches: ['fix/0.16.7-setup-process-shutdown-v2']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  stress:
+    runs-on: windows-latest
+    timeout-minutes: 25
+    env:
+      BASE_URL: https://github.com/Silverrain2004/SyntexLauncher-Distribution/releases/download/v0.16.6/SyntexLauncher-0.16.6-win-x64.zip
+      BASE_SHA: f34397dae9ca7986ef5d8f9183c6d4ee355126d2c9b913dea6eee561835ada74
+      BASE_SIZE: 69903997
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.400'
+
+      - name: Prepare immutable baseline and candidate
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $work=Join-Path $env:RUNNER_TEMP 'lifecycle-repair-stress-fast'
+          $base=Join-Path $work 'base.zip'
+          $candidate=Join-Path $work 'candidate'
+          $root=Join-Path $work 'installed-root'
+          $dist=Join-Path $work 'dist'
+          New-Item -ItemType Directory -Force $work,$candidate,$root,$dist|Out-Null
+          Invoke-WebRequest $env:BASE_URL -OutFile $base -UseBasicParsing
+          if((Get-Item $base).Length-ne[int64]$env:BASE_SIZE){throw 'Immutable 0.16.6 size changed'}
+          $sha=(Get-FileHash $base -Algorithm SHA256).Hash.ToLowerInvariant()
+          if($sha-ne$env:BASE_SHA){throw "Immutable 0.16.6 hash changed: $sha"}
+          Expand-Archive $base $candidate -Force
+          Expand-Archive $base $root -Force
+          "WORK=$work"|Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          "BASE_ZIP=$base"|Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          "CANDIDATE=$candidate"|Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          "ROOT=$root"|Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          "DIST=$dist"|Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          Write-Host 'STRESS_IMMUTABLE_0166_BASELINE_PASS'
+
+      - name: Apply explicit-show lifecycle patch
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $patchDir=Join-Path $env:RUNNER_TEMP 'managed-lifecycle-stress'
+          New-Item -ItemType Directory -Force $patchDir|Out-Null
+          Copy-Item .\rc-src\PatchManagedStartup.cs (Join-Path $patchDir 'Program.cs')
+          @'
+          <Project Sdk="Microsoft.NET.Sdk">
+            <PropertyGroup>
+              <OutputType>Exe</OutputType>
+              <TargetFramework>net10.0</TargetFramework>
+              <ImplicitUsings>enable</ImplicitUsings>
+              <Nullable>enable</Nullable>
+            </PropertyGroup>
+            <ItemGroup><PackageReference Include="Mono.Cecil" Version="0.11.6" /></ItemGroup>
+          </Project>
+          '@|Set-Content (Join-Path $patchDir 'Patcher.csproj') -Encoding utf8
+          $out=dotnet run --project (Join-Path $patchDir 'Patcher.csproj') -c Release -- (Join-Path $env:CANDIDATE 'app')
+          $out|Write-Host
+          if($LASTEXITCODE-ne0){throw "Managed lifecycle patch failed: $LASTEXITCODE"}
+          if(($out-join"`n")-notmatch'PATCH_OK_AVALONIA_LIFECYCLE:.*EXPLICIT_SHOW=1'){throw 'Explicit-show lifecycle marker missing'}
+          Write-Host 'STRESS_EXPLICIT_SHOW_LIFECYCLE_PATCH_PASS'
+
+      - name: Locate x64 toolchain
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $vswhere=Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+          $vs=&$vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if([string]::IsNullOrWhiteSpace($vs)){throw 'VC++ x64 tools missing'}
+          "VSDEVCMD=$(Join-Path $vs 'Common7\Tools\VsDevCmd.bat')"|Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Build x64 host and update agent
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $cmd=Join-Path $env:RUNNER_TEMP 'build-native-stress.cmd'
+          @(
+            '@echo on',
+            "call `"$env:VSDEVCMD`" -arch=x64 -host_arch=x64",
+            'if errorlevel 1 exit /b %errorlevel%',
+            "cl.exe /nologo /DNOMINMAX /utf-8 /std:c++20 /EHsc /W4 /O1 /Os /GL /MT `"$env:GITHUB_WORKSPACE\rc-src\LauncherHost.cpp`" /Fe:`"$env:CANDIDATE\SyntexLauncher.exe`" /link /SUBSYSTEM:WINDOWS /MACHINE:X64 /LTCG /OPT:REF /OPT:ICF winhttp.lib bcrypt.lib shell32.lib user32.lib",
+            'if errorlevel 1 exit /b %errorlevel%',
+            "cl.exe /nologo /DNOMINMAX /utf-8 /std:c++20 /EHsc /W4 /O1 /Os /GL /MT `"$env:GITHUB_WORKSPACE\rc-src\UpdateAgent.cpp`" /Fe:`"$env:CANDIDATE\app\SyntexUpdateAgent.exe`" /link /SUBSYSTEM:WINDOWS /MACHINE:X64 /LTCG /OPT:REF /OPT:ICF shell32.lib user32.lib",
+            'exit /b %errorlevel%'
+          )|Set-Content $cmd -Encoding ascii
+          &cmd.exe /d /c $cmd
+          if($LASTEXITCODE-ne0){throw "Native x64 build failed: $LASTEXITCODE"}
+          Write-Host 'STRESS_NATIVE_X64_BUILD_PASS'
+
+      - name: Package fast candidate
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $zip=Join-Path $env:DIST 'SyntexLauncher-0.16.7-lifecycle-stress-fast.zip'
+          Push-Location $env:CANDIDATE
+          try{&7z a -tzip -mx=1 -y $zip '.\*'|Out-Host}finally{Pop-Location}
+          if($LASTEXITCODE-ne0){throw "Candidate ZIP failed: $LASTEXITCODE"}
+          $sha=(Get-FileHash $zip -Algorithm SHA256).Hash.ToLowerInvariant()
+          $size=(Get-Item $zip).Length
+          "CANDIDATE_ZIP=$zip"|Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          "CANDIDATE_SHA=$sha"|Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          "CANDIDATE_SIZE=$size"|Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          Write-Host "STRESS_PAYLOAD_SHA=$sha SIZE=$size"
+
+      - name: Build stress Setup
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          ./scripts/Patch-SetupProcessShutdown.ps1 -SetupSource ./rc-src/Setup.cpp
+          ./scripts/Patch-SetupGracefulShutdown.ps1 -SetupSource ./rc-src/Setup.cpp
+          @(
+            '#pragma once',
+            'static constexpr wchar_t PAYLOAD_URL[] = L"https://ci.invalid/lifecycle-stress.zip";',
+            ("static constexpr wchar_t PAYLOAD_SHA256[] = L`"{0}`";" -f $env:CANDIDATE_SHA),
+            ("static constexpr unsigned long long PAYLOAD_SIZE = {0}ULL;" -f [int64]$env:CANDIDATE_SIZE)
+          )|Set-Content ./rc-src/PayloadContract.h -Encoding utf8
+          $setup=Join-Path $env:DIST 'SyntexSetup-0.16.7-lifecycle-stress-fast.exe'
+          $cmd=Join-Path $env:RUNNER_TEMP 'build-setup-stress-fast.cmd'
+          @(
+            '@echo on',
+            "call `"$env:VSDEVCMD`" -arch=x64 -host_arch=x64",
+            'if errorlevel 1 exit /b %errorlevel%',
+            "cl.exe /nologo /DNOMINMAX /utf-8 /std:c++20 /EHsc /W4 /O2 /MT /I`"$env:GITHUB_WORKSPACE\rc-src`" `"$env:GITHUB_WORKSPACE\rc-src\Setup.cpp`" /Fe:`"$setup`" /link /SUBSYSTEM:WINDOWS /MACHINE:X64 winhttp.lib bcrypt.lib shell32.lib ole32.lib user32.lib gdi32.lib advapi32.lib comctl32.lib uxtheme.lib",
+            'exit /b %errorlevel%'
+          )|Set-Content $cmd -Encoding ascii
+          &cmd.exe /d /c $cmd
+          if($LASTEXITCODE-ne0){throw "Setup x64 build failed: $LASTEXITCODE"}
+          "SETUP_EXE=$setup"|Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          foreach($arg in @('--self-test','--repair-self-test','--log-self-test')){
+            $p=Start-Process $setup -ArgumentList $arg -PassThru -Wait
+            if($p.ExitCode-ne0){throw "$arg failed: $($p.ExitCode)"}
+          }
+          Write-Host 'STRESS_SETUP_X64_SELFTEST_PASS'
+
+      - name: Upgrade running 0.16.6 to visible 0.16.7
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          foreach($d in @('storage','data','instances','runtimes')){
+            New-Item -ItemType Directory -Force (Join-Path $env:ROOT $d)|Out-Null
+            "KEEP-$d"|Set-Content (Join-Path $env:ROOT "$d\keep.txt") -Encoding ascii
+          }
+          $old=Start-Process (Join-Path $env:ROOT 'SyntexLauncher.exe') -WorkingDirectory $env:ROOT -PassThru
+          Start-Sleep -Seconds 3
+          if($old.HasExited){throw "0.16.6 exited before repair: $($old.ExitCode)"}
+          $oldPid=$old.Id
+          $setup=Start-Process $env:SETUP_EXE -ArgumentList @('--ci-install-local',"`"$env:ROOT`"","`"$env:CANDIDATE_ZIP`"") -PassThru
+          if(-not $setup.WaitForExit(180000)){try{$setup.Kill($true)}catch{};throw 'Initial upgrade repair timed out'}
+          if($setup.ExitCode-ne0){throw "Initial upgrade repair failed: $($setup.ExitCode)"}
+          if(Get-Process -Id $oldPid -ErrorAction SilentlyContinue){throw 'Original 0.16.6 host survived repair'}
+          foreach($d in @('storage','data','instances','runtimes')){
+            if((Get-Content (Join-Path $env:ROOT "$d\keep.txt") -Raw).Trim()-ne"KEEP-$d"){throw "Upgrade changed $d"}
+          }
+          Write-Host 'STRESS_RUNNING_0166_TO_VISIBLE_0167_PASS'
+
+      - name: Ten consecutive repairs while 0.16.7 is running
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $logs=Join-Path $env:ROOT 'storage\logs\launcher-startup'
+          for($i=1;$i-le10;$i++){
+            $before=(Get-ChildItem $logs -File -ErrorAction SilentlyContinue).Count
+            $setup=Start-Process $env:SETUP_EXE -ArgumentList @('--ci-install-local',"`"$env:ROOT`"","`"$env:CANDIDATE_ZIP`"") -PassThru
+            if(-not $setup.WaitForExit(180000)){try{$setup.Kill($true)}catch{};throw "Repair cycle $i timed out"}
+            if($setup.ExitCode-ne0){
+              Get-ChildItem $logs -File -ErrorAction SilentlyContinue|Sort-Object LastWriteTime|ForEach-Object{Write-Host "--- $($_.Name) ---";Get-Content $_.FullName -Raw|Write-Host}
+              throw "Repair cycle $i failed: $($setup.ExitCode)"
+            }
+            $after=(Get-ChildItem $logs -File -ErrorAction SilentlyContinue).Count
+            if($after-le$before){throw "Repair cycle $i produced no new startup health log"}
+            $latest=Get-ChildItem $logs -File|Sort-Object LastWriteTime|Select-Object -Last 1
+            $text=Get-Content $latest.FullName -Raw
+            if($text-notmatch'Startprüfung erfolgreich: sichtbares Launcher-Fenster erkannt'){throw "Repair cycle $i has no visible-window success marker"}
+            foreach($d in @('storage','data','instances','runtimes')){
+              if((Get-Content (Join-Path $env:ROOT "$d\keep.txt") -Raw).Trim()-ne"KEEP-$d"){throw "Repair cycle $i changed $d"}
+            }
+            Write-Host "STRESS_REPAIR_CYCLE_${i}_VISIBLE_USER_DATA_PASS"
+          }
+          Write-Host 'TEN_CONSECUTIVE_RUNNING_0167_REPAIRS_VISIBLE_USER_DATA_PASS'
+
+      - name: Reverify immutable baseline
+        shell: pwsh
+        run: |
+          $sha=(Get-FileHash $env:BASE_ZIP -Algorithm SHA256).Hash.ToLowerInvariant()
+          if($sha-ne$env:BASE_SHA-or(Get-Item $env:BASE_ZIP).Length-ne[int64]$env:BASE_SIZE){throw 'Immutable 0.16.6 baseline changed'}
+          Write-Host 'STRESS_IMMUTABLE_0166_RECHECK_PASS'
