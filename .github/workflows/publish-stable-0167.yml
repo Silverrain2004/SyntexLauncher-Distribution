@@ -6,6 +6,11 @@ on:
     paths:
       - '.github/workflows/publish-stable-0167.yml'
       - 'scripts/Assert-NewStableVersion.ps1'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/publish-stable-0167.yml'
+      - 'scripts/Assert-NewStableVersion.ps1'
   workflow_dispatch:
     inputs:
       dry_run:
@@ -21,6 +26,7 @@ on:
 
 permissions:
   contents: read
+  actions: read
 
 concurrency:
   group: stable-publish-0.16.7
@@ -81,13 +87,14 @@ jobs:
           }
           Write-Host 'NO_DESTRUCTIVE_PUBLISH_PRIMITIVES_PASS'
 
-  verify-and-publish:
-    name: verify-and-publish-0.16.7
-    if: github.event_name == 'workflow_dispatch'
+  verify-approved-inputs:
+    name: verify-approved-stable-inputs
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
     needs: immutable-publish-contract
     runs-on: windows-latest
     permissions:
-      contents: write
+      contents: read
+      actions: read
     steps:
       - uses: actions/checkout@v4
 
@@ -97,7 +104,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           $ErrorActionPreference = 'Stop'
-          if ('${{ github.ref }}' -ne 'refs/heads/main') { throw 'Stable publishing is allowed only from main.' }
+          if ('${{ github.ref }}' -ne 'refs/heads/main') { throw 'Stable input verification is allowed only from main.' }
           & ./scripts/Assert-NewStableVersion.ps1 -Repository '${{ github.repository }}' -Version $env:VERSION
           if ($LASTEXITCODE -ne 0) { throw 'Stable version is not safely available.' }
 
@@ -105,15 +112,13 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $dist = Join-Path $env:RUNNER_TEMP 'stable-0167'
+          $dist = Join-Path $env:RUNNER_TEMP 'stable-0167-verify'
           New-Item -ItemType Directory -Force $dist | Out-Null
           $payload = Join-Path $dist 'SyntexLauncher-0.16.7-win-x64.zip'
           Invoke-WebRequest $env:PAYLOAD_URL -OutFile $payload -UseBasicParsing
           if ((Get-Item $payload).Length -ne [int64]$env:PAYLOAD_SIZE) { throw 'Approved payload size mismatch.' }
           $hash = (Get-FileHash $payload -Algorithm SHA256).Hash.ToLowerInvariant()
           if ($hash -ne $env:PAYLOAD_SHA256) { throw "Approved payload SHA-256 mismatch: $hash" }
-          "DIST=$dist" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
-          "PAYLOAD_FILE=$payload" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
           Write-Host 'APPROVED_PAYLOAD_EXACT_MATCH_PASS'
 
       - name: Download and verify exact post-merge final Setup artifact
@@ -122,7 +127,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           $ErrorActionPreference = 'Stop'
-          $setupDir = Join-Path $env:DIST 'setup-artifact'
+          $setupDir = Join-Path $env:RUNNER_TEMP 'stable-0167-setup-artifact'
           New-Item -ItemType Directory -Force $setupDir | Out-Null
           gh run download $env:SETUP_RUN_ID --repo '${{ github.repository }}' --name $env:SETUP_ARTIFACT --dir $setupDir
           if ($LASTEXITCODE -ne 0) { throw 'Could not download the approved post-merge Setup artifact.' }
@@ -132,28 +137,28 @@ jobs:
           if ((Get-Item $setup).Length -ne [int64]$env:SETUP_SIZE) { throw 'Approved Setup size mismatch.' }
           $hash = (Get-FileHash $setup -Algorithm SHA256).Hash.ToLowerInvariant()
           if ($hash -ne $env:SETUP_SHA256) { throw "Approved Setup SHA-256 mismatch: $hash" }
-          $stableSetup = Join-Path $env:DIST 'SyntexSetup-0.16.7-x64.exe'
-          Copy-Item $setup $stableSetup -Force
-          "SETUP_FILE=$stableSetup" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
           Write-Host 'APPROVED_SETUP_EXACT_MATCH_PASS'
-
-      - name: Dry-run gate
-        if: inputs.dry_run
-        shell: pwsh
-        run: |
-          if ('${{ inputs.confirm }}') { Write-Host 'Confirmation text is ignored in dry-run mode.' }
           Write-Host 'STABLE_0_16_7_DRY_RUN_ALL_INPUTS_VERIFIED'
 
-      - name: Require explicit publish confirmation
-        if: ${{ !inputs.dry_run }}
+  publish:
+    name: publish-0.16.7-once
+    if: github.event_name == 'workflow_dispatch' && !inputs.dry_run
+    needs: [immutable-publish-contract, verify-approved-inputs]
+    runs-on: windows-latest
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Require exact publish confirmation and main
         shell: pwsh
         run: |
-          if ('${{ inputs.confirm }}' -cne 'PUBLISH-0.16.7') {
-            throw 'Real publishing requires the exact confirmation text PUBLISH-0.16.7.'
-          }
+          $ErrorActionPreference = 'Stop'
+          if ('${{ github.ref }}' -ne 'refs/heads/main') { throw 'Stable publishing is allowed only from main.' }
+          if ('${{ inputs.confirm }}' -cne 'PUBLISH-0.16.7') { throw 'Real publishing requires the exact confirmation text PUBLISH-0.16.7.' }
 
       - name: Recheck immutable version immediately before release creation
-        if: ${{ !inputs.dry_run }}
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
@@ -162,8 +167,43 @@ jobs:
           & ./scripts/Assert-NewStableVersion.ps1 -Repository '${{ github.repository }}' -Version $env:VERSION
           if ($LASTEXITCODE -ne 0) { throw 'Stable version became unavailable before publication.' }
 
+      - name: Re-download and verify exact approved release files
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $dist = Join-Path $env:RUNNER_TEMP 'stable-0167-publish'
+          New-Item -ItemType Directory -Force $dist | Out-Null
+          $payload = Join-Path $dist 'SyntexLauncher-0.16.7-win-x64.zip'
+          Invoke-WebRequest $env:PAYLOAD_URL -OutFile $payload -UseBasicParsing
+          if ((Get-Item $payload).Length -ne [int64]$env:PAYLOAD_SIZE) { throw 'Approved payload size mismatch before publish.' }
+          if ((Get-FileHash $payload -Algorithm SHA256).Hash.ToLowerInvariant() -ne $env:PAYLOAD_SHA256) { throw 'Approved payload SHA-256 mismatch before publish.' }
+          $setupDir = Join-Path $dist 'setup-artifact'
+          New-Item -ItemType Directory -Force $setupDir | Out-Null
+          gh run download $env:SETUP_RUN_ID --repo '${{ github.repository }}' --name $env:SETUP_ARTIFACT --dir $setupDir
+          if ($LASTEXITCODE -ne 0) { throw 'Could not download approved Setup before publish.' }
+          $files = @(Get-ChildItem $setupDir -File -Recurse)
+          if ($files.Count -ne 1) { throw "Expected exactly one Setup file before publish, found $($files.Count)." }
+          $setup = $files[0].FullName
+          if ((Get-Item $setup).Length -ne [int64]$env:SETUP_SIZE) { throw 'Approved Setup size mismatch before publish.' }
+          if ((Get-FileHash $setup -Algorithm SHA256).Hash.ToLowerInvariant() -ne $env:SETUP_SHA256) { throw 'Approved Setup SHA-256 mismatch before publish.' }
+          $stableSetup = Join-Path $dist 'SyntexSetup-0.16.7-x64.exe'
+          Copy-Item $setup $stableSetup -Force
+          "PAYLOAD_FILE=$payload" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          "SETUP_FILE=$stableSetup" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          Write-Host 'RELEASE_FILES_REVERIFIED_IMMEDIATELY_BEFORE_PUBLISH'
+
+      - name: Final immutable recheck
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          & ./scripts/Assert-NewStableVersion.ps1 -Repository '${{ github.repository }}' -Version $env:VERSION
+          if ($LASTEXITCODE -ne 0) { throw 'Stable version became unavailable at final publish gate.' }
+
       - name: Create new stable release exactly once
-        if: ${{ !inputs.dry_run }}
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
