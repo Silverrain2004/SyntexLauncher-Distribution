@@ -16,6 +16,7 @@ $tag = "v$Version"
 
 # Stable publishing is append-only. A pre-existing release OR git tag means this
 # version has already been claimed and must never be recreated or clobbered.
+# Any lookup ambiguity is treated as unsafe and therefore blocks publishing.
 & gh api --silent "repos/$Repository/releases/tags/$tag" 2>$null
 if ($LASTEXITCODE -eq 0) {
     throw "IMMUTABLE_STABLE_REJECTED: release $tag already exists. Existing Stable releases/assets must never be replaced."
