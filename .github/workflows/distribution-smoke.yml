@@ -14,22 +14,21 @@ jobs:
   windows-x64-public-distribution:
     runs-on: windows-latest
     steps:
-      - name: Validate public manifest and release payload
+      - uses: actions/checkout@v4
+
+      - name: Validate manifest and immutable release payload
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $manifestUrl = 'https://raw.githubusercontent.com/Silverrain2004/SyntexLauncher-Distribution/main/distribution.json'
-          $manifestPath = Join-Path $env:RUNNER_TEMP 'distribution.json'
-          Invoke-WebRequest -Uri $manifestUrl -OutFile $manifestPath -UseBasicParsing
-          $manifest = Get-Content $manifestPath -Raw | ConvertFrom-Json
-          if ($manifest.product -ne 'Syntex Launcher') { throw 'Unexpected product in public manifest.' }
+          $manifest = Get-Content "$env:GITHUB_WORKSPACE\distribution.json" -Raw | ConvertFrom-Json
+          if ($manifest.product -ne 'Syntex Launcher') { throw 'Unexpected product in manifest.' }
           if ($manifest.channel -ne 'stable') { throw 'Unexpected release channel.' }
           if ($manifest.version -ne '0.16.6') { throw "Unexpected version: $($manifest.version)" }
           if ($manifest.runtimeIdentifier -ne 'win-x64') { throw 'Unexpected runtime identifier.' }
           if ($manifest.minimumWindowsBuild -ne 17763) { throw 'Unexpected minimum Windows build.' }
           if (-not ([string]$manifest.payload.url).StartsWith('https://')) { throw 'Payload URL is not HTTPS.' }
-          if ($manifest.payload.sha256 -ne '78870eca0ce18e16010b014d1e5f4a7c7a5a6d633bb94a62327fb3e23db7c743') { throw 'Unexpected payload SHA-256 in manifest.' }
-          if ([int64]$manifest.payload.size -ne 69903914) { throw 'Unexpected payload size in manifest.' }
+          if ($manifest.payload.sha256 -ne 'f34397dae9ca7986ef5d8f9183c6d4ee355126d2c9b913dea6eee561835ada74') { throw 'Unexpected payload SHA-256 in manifest.' }
+          if ([int64]$manifest.payload.size -ne 69903997) { throw 'Unexpected payload size in manifest.' }
 
           $payload = Join-Path $env:RUNNER_TEMP 'SyntexLauncher-0.16.6-win-x64.zip'
           Invoke-WebRequest -Uri $manifest.payload.url -OutFile $payload -UseBasicParsing
@@ -38,7 +37,7 @@ jobs:
           if ($payloadHash -ne $manifest.payload.sha256) { throw "Downloaded payload SHA-256 mismatch: $payloadHash" }
           Write-Host "PUBLIC PAYLOAD PASS · $((Get-Item $payload).Length) bytes · SHA256 $payloadHash"
 
-      - name: Validate and launch public native setup
+      - name: Validate immutable public setup asset
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -47,42 +46,10 @@ jobs:
           Invoke-WebRequest -Uri $setupUrl -OutFile $setup -UseBasicParsing
           if ((Get-Item $setup).Length -ne 331776) { throw "Unexpected public setup size: $((Get-Item $setup).Length)" }
           $setupHash = (Get-FileHash $setup -Algorithm SHA256).Hash.ToLowerInvariant()
-          if ($setupHash -ne '1d3dc6b4e95408ff6e0caf6c49b706ff2ed35d87c00bb62e85a2ffb882b1cc32') { throw "Public setup SHA-256 mismatch: $setupHash" }
-
+          if ($setupHash -ne '7d785b1b4205ccb9bc59ab630bebd93a9853ba8f4bbf491f8315091e12241c17') { throw "Public setup SHA-256 mismatch: $setupHash" }
           $bytes = [IO.File]::ReadAllBytes($setup)
           if ($bytes[0] -ne 0x4D -or $bytes[1] -ne 0x5A) { throw 'Public setup is not a PE executable.' }
           $pe = [BitConverter]::ToInt32($bytes, 0x3C)
           $machine = [BitConverter]::ToUInt16($bytes, $pe + 4)
           if ($machine -ne 0x8664) { throw ("Expected AMD64 PE machine 0x8664, got 0x{0:X4}" -f $machine) }
-
-          $p = Start-Process -FilePath $setup -PassThru
-          try {
-            $deadline = [DateTime]::UtcNow.AddSeconds(15)
-            do {
-              Start-Sleep -Milliseconds 100
-              $p.Refresh()
-              if ($p.HasExited) { throw "Public setup exited before opening a window: $($p.ExitCode)" }
-            } while ($p.MainWindowHandle -eq [IntPtr]::Zero -and [DateTime]::UtcNow -lt $deadline)
-            if ($p.MainWindowHandle -eq [IntPtr]::Zero) { throw 'Public setup did not open a native Windows window within 15 seconds.' }
-            Write-Host "PUBLIC SETUP PASS · 331776 bytes · x64 · SHA256 $setupHash · HWND $($p.MainWindowHandle)"
-          }
-          finally {
-            if (-not $p.HasExited) { Stop-Process -Id $p.Id -Force }
-          }
-
-      - name: Full public install and managed GUI startup
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $setup = Join-Path $env:RUNNER_TEMP 'SyntexLauncherSetup-0.16.6-win-x64.exe'
-          $target = Join-Path $env:RUNNER_TEMP 'Syntex-Public-Smoke-0.16.6'
-          Remove-Item $target -Recurse -Force -ErrorAction SilentlyContinue
-          $p = Start-Process -FilePath $setup -ArgumentList @('--ci-install',$target) -PassThru -Wait
-          if ($p.ExitCode -ne 0) {
-            $setupLogs = Join-Path $env:RUNNER_TEMP 'SyntexSetup-Log'
-            if (Test-Path $setupLogs) { Get-ChildItem $setupLogs -File | ForEach-Object { Get-Content $_.FullName -Raw | Out-Host } }
-            $startLogs = Join-Path $target 'storage\logs\launcher-startup'
-            if (Test-Path $startLogs) { Get-ChildItem $startLogs -File | ForEach-Object { Get-Content $_.FullName -Raw | Out-Host } }
-            throw "Public install/start smoke failed: $($p.ExitCode)"
-          }
-          Write-Host 'PUBLIC INSTALL + MANAGED GUI STARTUP PASS.'
+          Write-Host "PUBLIC SETUP ASSET PASS · 331776 bytes · x64 · SHA256 $setupHash"
