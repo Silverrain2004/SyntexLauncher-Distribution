@@ -1,0 +1,221 @@
+name: Syntex 0.16.7 Final Candidate Gate
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ['feat/0.16.7-self-update']
+    paths:
+      - 'rc-src/LauncherHost.cpp'
+      - 'rc-src/UpdateAgent.cpp'
+      - 'rc-src/Setup.cpp'
+      - 'rc-src/RepairTransaction.h'
+      - 'rc-src/PatchManagedStartup.cs'
+      - '.github/workflows/0167-final-candidate-gate.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  windows-final-gate:
+    runs-on: windows-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/0.16.7-self-update
+          fetch-depth: 0
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.400'
+
+      - name: Prepare immutable 0.16.6 baseline and candidate copies
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $work=Join-Path $env:RUNNER_TEMP 'syntex-0167-final-gate'
+          $candidate=Join-Path $work 'candidate-good'
+          $bad=Join-Path $work 'candidate-bad'
+          $updateRoot=Join-Path $work 'update-root'
+          $dist=Join-Path $work 'dist'
+          New-Item -ItemType Directory -Force -Path $work,$candidate,$bad,$updateRoot,$dist | Out-Null
+          $baseZip=Join-Path $work 'base-0.16.6.zip'
+          Invoke-WebRequest -Uri 'https://github.com/Silverrain2004/SyntexLauncher-Distribution/releases/download/v0.16.6/SyntexLauncher-0.16.6-win-x64.zip' -OutFile $baseZip -UseBasicParsing
+          if((Get-Item $baseZip).Length -ne 69903997){throw 'Published 0.16.6 payload size changed.'}
+          $sha=(Get-FileHash $baseZip -Algorithm SHA256).Hash.ToLowerInvariant()
+          if($sha -ne 'f34397dae9ca7986ef5d8f9183c6d4ee355126d2c9b913dea6eee561835ada74'){throw "Published 0.16.6 payload hash changed: $sha"}
+          Expand-Archive $baseZip $candidate -Force
+          Expand-Archive $baseZip $bad -Force
+          Expand-Archive $baseZip $updateRoot -Force
+          "WORK=$work" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          "BASE_ZIP=$baseZip" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          "CANDIDATE=$candidate" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          "BAD=$bad" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          "UPDATE_ROOT=$updateRoot" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          "DIST=$dist" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          "GOOD_TAG=v0.16.7-ci-$env:GITHUB_RUN_ID" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          "BAD_TAG=v0.16.7-ci-bad-$env:GITHUB_RUN_ID" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Patch managed startup in good candidate
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $patchDir=Join-Path $env:RUNNER_TEMP 'managed-startup-patcher'
+          New-Item -ItemType Directory -Force $patchDir | Out-Null
+          Copy-Item .\rc-src\PatchManagedStartup.cs (Join-Path $patchDir 'Program.cs')
+          @'
+          <Project Sdk="Microsoft.NET.Sdk">
+            <PropertyGroup><OutputType>Exe</OutputType><TargetFramework>net10.0</TargetFramework><ImplicitUsings>enable</ImplicitUsings><Nullable>enable</Nullable></PropertyGroup>
+            <ItemGroup><PackageReference Include="Mono.Cecil" Version="0.11.6" /></ItemGroup>
+          </Project>
+          '@ | Set-Content (Join-Path $patchDir 'Patcher.csproj') -Encoding utf8
+          dotnet run --project (Join-Path $patchDir 'Patcher.csproj') -c Release -- (Join-Path $env:CANDIDATE 'app')
+          if($LASTEXITCODE -ne 0){throw "Managed startup patch failed: $LASTEXITCODE"}
+
+      - name: Locate Visual C++ x64 toolchain
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $vswhere=Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+          $vs=& $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if([string]::IsNullOrWhiteSpace($vs)){throw 'Visual C++ x64 tools not found.'}
+          "VSDEVCMD=$(Join-Path $vs 'Common7\Tools\VsDevCmd.bat')" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Build current x64 host and update agent into both candidates
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $cmd=Join-Path $env:RUNNER_TEMP 'build-native.cmd'
+          @('@echo on',"call `"$env:VSDEVCMD`" -arch=x64 -host_arch=x64",'if errorlevel 1 exit /b %errorlevel%',
+          "cl.exe /nologo /DNOMINMAX /utf-8 /std:c++20 /EHsc /W4 /O1 /Os /GL /MT `"$env:GITHUB_WORKSPACE\rc-src\LauncherHost.cpp`" /Fe:`"$env:CANDIDATE\SyntexLauncher.exe`" /link /SUBSYSTEM:WINDOWS /MACHINE:X64 /LTCG /OPT:REF /OPT:ICF winhttp.lib bcrypt.lib shell32.lib user32.lib",
+          'if errorlevel 1 exit /b %errorlevel%',
+          "cl.exe /nologo /DNOMINMAX /utf-8 /std:c++20 /EHsc /W4 /O1 /Os /GL /MT `"$env:GITHUB_WORKSPACE\rc-src\UpdateAgent.cpp`" /Fe:`"$env:CANDIDATE\app\SyntexUpdateAgent.exe`" /link /SUBSYSTEM:WINDOWS /MACHINE:X64 /LTCG /OPT:REF /OPT:ICF shell32.lib user32.lib",
+          'if errorlevel 1 exit /b %errorlevel%',
+          "copy /y `"$env:CANDIDATE\SyntexLauncher.exe`" `"$env:BAD\SyntexLauncher.exe`" >nul",
+          "copy /y `"$env:CANDIDATE\app\SyntexUpdateAgent.exe`" `"$env:BAD\app\SyntexUpdateAgent.exe`" >nul",'exit /b %errorlevel%') | Set-Content $cmd -Encoding ascii
+          & cmd.exe /d /c $cmd
+          if($LASTEXITCODE -ne 0){throw "Native build failed: $LASTEXITCODE"}
+          "GOOD_HOST_HASH=$((Get-FileHash (Join-Path $env:CANDIDATE 'SyntexLauncher.exe') -Algorithm SHA256).Hash.ToLowerInvariant())" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Prove good candidate opens a real visible launcher window
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $p=Start-Process (Join-Path $env:CANDIDATE 'SyntexLauncher.exe') -ArgumentList '--ci-gui-self-test' -PassThru
+          if(-not $p.WaitForExit(45000)){try{$p.Kill($true)}catch{}; throw 'Good candidate visible-window healthcheck timed out.'}
+          if($p.ExitCode -ne 0){throw "Good candidate visible-window healthcheck failed: $($p.ExitCode)"}
+          $text=(Get-ChildItem (Join-Path $env:CANDIDATE 'storage\logs\launcher-startup') -File | ForEach-Object {Get-Content $_.FullName -Raw}) -join "`n"
+          if($text -notmatch 'Startprüfung erfolgreich: sichtbares Launcher-Fenster erkannt'){throw 'Visible-window success evidence missing.'}
+          Get-Process SyntexLauncher -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+          Write-Host 'GOOD_CANDIDATE_REAL_VISIBLE_WINDOW_PASS'
+
+      - name: Package good and intentionally bad candidates
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $goodZip=Join-Path $env:DIST 'SyntexLauncher-0.16.7-ci-win-x64.zip'
+          $badZip=Join-Path $env:DIST 'SyntexLauncher-0.16.7-ci-bad-win-x64.zip'
+          Push-Location $env:CANDIDATE; try{& 7z a -tzip -mx=9 -y $goodZip '.\*' | Out-Host}finally{Pop-Location}; if($LASTEXITCODE -ne 0){throw 'Good ZIP failed.'}
+          Push-Location $env:BAD; try{& 7z a -tzip -mx=9 -y $badZip '.\*' | Out-Host}finally{Pop-Location}; if($LASTEXITCODE -ne 0){throw 'Bad ZIP failed.'}
+          "GOOD_ZIP=$goodZip" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          "GOOD_SHA=$((Get-FileHash $goodZip -Algorithm SHA256).Hash.ToLowerInvariant())" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          "GOOD_SIZE=$((Get-Item $goodZip).Length)" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          "BAD_ZIP=$badZip" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          "BAD_SHA=$((Get-FileHash $badZip -Algorithm SHA256).Hash.ToLowerInvariant())" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          "BAD_SIZE=$((Get-Item $badZip).Length)" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Publish immutable per-run prerelease assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          gh release view $env:GOOD_TAG *> $null; if($LASTEXITCODE -eq 0){throw "CI release already exists: $env:GOOD_TAG"}
+          gh release view $env:BAD_TAG *> $null; if($LASTEXITCODE -eq 0){throw "CI release already exists: $env:BAD_TAG"}
+          gh release create $env:GOOD_TAG $env:GOOD_ZIP --prerelease --title "Syntex 0.16.7 CI $env:GITHUB_RUN_ID" --notes 'Immutable automated candidate; not a stable user release.'
+          if($LASTEXITCODE -ne 0){throw 'Good CI release publish failed.'}
+          gh release create $env:BAD_TAG $env:BAD_ZIP --prerelease --title "Syntex 0.16.7 CI bad $env:GITHUB_RUN_ID" --notes 'Immutable automated rollback candidate; intentionally fails startup.'
+          if($LASTEXITCODE -ne 0){throw 'Bad CI release publish failed.'}
+          "GOOD_URL=https://github.com/Silverrain2004/SyntexLauncher-Distribution/releases/download/$env:GOOD_TAG/SyntexLauncher-0.16.7-ci-win-x64.zip" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          "BAD_URL=https://github.com/Silverrain2004/SyntexLauncher-Distribution/releases/download/$env:BAD_TAG/SyntexLauncher-0.16.7-ci-bad-win-x64.zip" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Build simulated 0.16.6 host against immutable good candidate
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          @"
+          {"schemaVersion":1,"product":"Syntex Launcher","channel":"ci-final-gate","version":"0.16.7","runtimeIdentifier":"win-x64","minimumWindowsBuild":17763,"payload":{"url":"$env:GOOD_URL","sha256":"$env:GOOD_SHA","size":$env:GOOD_SIZE}}
+          "@ | Set-Content .\self-update-final-gate.json -Encoding utf8
+          git config user.name 'github-actions[bot]'; git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add self-update-final-gate.json; git commit -m "Update final gate manifest $env:GITHUB_RUN_ID"; git push origin HEAD:feat/0.16.7-self-update
+          $src=Get-Content .\rc-src\LauncherHost.cpp -Raw
+          $src=$src.Replace('static constexpr wchar_t kCurrentVersion[] = L"0.16.7";','static constexpr wchar_t kCurrentVersion[] = L"0.16.6";')
+          $src=$src.Replace('https://raw.githubusercontent.com/Silverrain2004/SyntexLauncher-Distribution/main/distribution.json','https://raw.githubusercontent.com/Silverrain2004/SyntexLauncher-Distribution/feat/0.16.7-self-update/self-update-final-gate.json')
+          $oldSrc=Join-Path $env:RUNNER_TEMP 'LauncherHost-old.cpp'; Set-Content $oldSrc $src -Encoding utf8
+          $cmd=Join-Path $env:RUNNER_TEMP 'build-old.cmd'
+          @('@echo on',"call `"$env:VSDEVCMD`" -arch=x64 -host_arch=x64",'if errorlevel 1 exit /b %errorlevel%',"cl.exe /nologo /DNOMINMAX /utf-8 /std:c++20 /EHsc /W4 /O1 /Os /GL /MT `"$oldSrc`" /Fe:`"$env:UPDATE_ROOT\SyntexLauncher.exe`" /link /SUBSYSTEM:WINDOWS /MACHINE:X64 /LTCG /OPT:REF /OPT:ICF winhttp.lib bcrypt.lib shell32.lib user32.lib",'exit /b %errorlevel%') | Set-Content $cmd -Encoding ascii
+          & cmd.exe /d /c $cmd; if($LASTEXITCODE -ne 0){throw 'Old host build failed.'}
+
+      - name: Real self-update with complete user-data preservation
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          foreach($d in @('storage','data','instances','runtimes')){New-Item -ItemType Directory -Force (Join-Path $env:UPDATE_ROOT $d)|Out-Null; "KEEP-$d"|Set-Content (Join-Path $env:UPDATE_ROOT "$d\keep.txt") -Encoding ascii}
+          $p=Start-Process (Join-Path $env:UPDATE_ROOT 'SyntexLauncher.exe') -PassThru -Wait
+          if($p.ExitCode -ne 0){throw "0.16.6 host handoff failed: $($p.ExitCode)"}
+          $deadline=[DateTime]::UtcNow.AddMinutes(3); $ok=$false
+          do{Start-Sleep -Milliseconds 500; $dir=Join-Path $env:UPDATE_ROOT 'storage\logs\launcher-update'; if(Test-Path $dir){if(Get-ChildItem $dir -File|Where-Object{(Get-Content $_.FullName -Raw)-match 'UPDATE_SUCCESS'}){$ok=$true;break}}}while([DateTime]::UtcNow -lt $deadline)
+          if(-not $ok){throw 'Self-update did not reach UPDATE_SUCCESS.'}
+          if((Get-FileHash (Join-Path $env:UPDATE_ROOT 'SyntexLauncher.exe') -Algorithm SHA256).Hash.ToLowerInvariant() -ne $env:GOOD_HOST_HASH){throw 'Updated host hash mismatch.'}
+          foreach($d in @('storage','data','instances','runtimes')){if((Get-Content (Join-Path $env:UPDATE_ROOT "$d\keep.txt") -Raw).Trim() -ne "KEEP-$d"){throw "Self-update changed $d user data."}}
+          Get-Process SyntexLauncher -ErrorAction SilentlyContinue|Stop-Process -Force -ErrorAction SilentlyContinue
+          Write-Host 'REAL_SELF_UPDATE_AND_USER_DATA_PRESERVATION_PASS'
+
+      - name: Build good and bad current Setup executables
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          function Build-Setup($url,$sha,$size,$out,$suffix){
+            @("#pragma once",("static constexpr wchar_t PAYLOAD_URL[] = L`"{0}`";" -f $url),("static constexpr wchar_t PAYLOAD_SHA256[] = L`"{0}`";" -f $sha),("static constexpr unsigned long long PAYLOAD_SIZE = {0}ULL;" -f $size)) | Set-Content .\rc-src\PayloadContract.h -Encoding utf8
+            $cmd=Join-Path $env:RUNNER_TEMP "build-setup-$suffix.cmd"
+            @('@echo on',"call `"$env:VSDEVCMD`" -arch=x64 -host_arch=x64",'if errorlevel 1 exit /b %errorlevel%',"cl.exe /nologo /DNOMINMAX /utf-8 /std:c++20 /EHsc /W4 /O2 /MT /I`"$env:GITHUB_WORKSPACE\rc-src`" `"$env:GITHUB_WORKSPACE\rc-src\Setup.cpp`" /Fe:`"$out`" /link /SUBSYSTEM:WINDOWS /MACHINE:X64 winhttp.lib bcrypt.lib shell32.lib ole32.lib user32.lib gdi32.lib advapi32.lib comctl32.lib uxtheme.lib",'exit /b %errorlevel%')|Set-Content $cmd -Encoding ascii
+            & cmd.exe /d /c $cmd; if($LASTEXITCODE -ne 0){throw "Setup $suffix build failed."}
+          }
+          $good=Join-Path $env:DIST 'SyntexSetup-0.16.7-x64.exe'; $bad=Join-Path $env:DIST 'SyntexSetup-0.16.7-x64-rollback-test.exe'
+          Build-Setup $env:GOOD_URL $env:GOOD_SHA $env:GOOD_SIZE $good 'good'
+          Build-Setup $env:BAD_URL $env:BAD_SHA $env:BAD_SIZE $bad 'bad'
+          "FINAL_SETUP=$good"|Out-File $env:GITHUB_ENV -Encoding utf8 -Append; "BAD_SETUP=$bad"|Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Real positive Setup repair and visible launcher start
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $root=Join-Path $env:WORK 'setup-good-root'; Expand-Archive $env:BASE_ZIP $root -Force
+          foreach($d in @('storage','data','instances','runtimes')){New-Item -ItemType Directory -Force (Join-Path $root $d)|Out-Null; "KEEP-$d"|Set-Content (Join-Path $root "$d\keep.txt") -Encoding ascii}
+          $p=Start-Process $env:FINAL_SETUP -ArgumentList @('--ci-install',"`"$root`"") -PassThru -Wait
+          if($p.ExitCode -ne 0){throw "Good Setup failed: $($p.ExitCode)"}
+          if((Get-FileHash (Join-Path $root 'SyntexLauncher.exe') -Algorithm SHA256).Hash.ToLowerInvariant() -ne $env:GOOD_HOST_HASH){throw 'Setup installed wrong host.'}
+          foreach($d in @('storage','data','instances','runtimes')){if((Get-Content (Join-Path $root "$d\keep.txt") -Raw).Trim() -ne "KEEP-$d"){throw "Setup changed $d user data."}}
+          Get-Process SyntexLauncher -ErrorAction SilentlyContinue|Stop-Process -Force -ErrorAction SilentlyContinue
+          Write-Host 'REAL_SETUP_REPAIR_VISIBLE_WINDOW_AND_USER_DATA_PASS'
+
+      - name: Real Setup rollback on startup failure
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $root=Join-Path $env:WORK 'setup-bad-root'; Expand-Archive $env:BASE_ZIP $root -Force
+          foreach($d in @('storage','data','instances','runtimes')){New-Item -ItemType Directory -Force (Join-Path $root $d)|Out-Null; "KEEP-$d"|Set-Content (Join-Path $root "$d\keep.txt") -Encoding ascii}
+          $oldHash=(Get-FileHash (Join-Path $root 'SyntexLauncher.exe') -Algorithm SHA256).Hash
+          $p=Start-Process $env:BAD_SETUP -ArgumentList @('--ci-install',"`"$root`"") -PassThru -Wait
+          if($p.ExitCode -eq 0){throw 'Bad Setup unexpectedly succeeded.'}
+          if((Get-FileHash (Join-Path $root 'SyntexLauncher.exe') -Algorithm SHA256).Hash -ne $oldHash){throw 'Rollback did not restore old host.'}
+          foreach($d in @('storage','data','instances','runtimes')){if((Get-Content (Join-Path $root "$d\keep.txt") -Raw).Trim() -ne "KEEP-$d"){throw "Rollback changed $d user data."}}
+          Write-Host 'REAL_SETUP_AUTOMATIC_ROLLBACK_PASS'
+
+      - name: Upload final candidate Setup only after all gates pass
+        uses: actions/upload-artifact@v4
+        with:
+          name: SyntexSetup-0.16.7-x64-final-candidate
+          path: ${{ env.FINAL_SETUP }}
+          if-no-files-found: error
+          retention-days: 7
