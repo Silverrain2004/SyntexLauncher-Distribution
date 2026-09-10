@@ -21,40 +21,74 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Validate manifest and immutable release payload
+      - name: Resolve approved stable contract
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
           $manifest = Get-Content "$env:GITHUB_WORKSPACE\distribution.json" -Raw | ConvertFrom-Json
           if ($manifest.product -ne 'Syntex Launcher') { throw 'Unexpected product in manifest.' }
           if ($manifest.channel -ne 'stable') { throw 'Unexpected release channel.' }
-          if ($manifest.version -ne '0.16.6') { throw "Unexpected version: $($manifest.version)" }
           if ($manifest.runtimeIdentifier -ne 'win-x64') { throw 'Unexpected runtime identifier.' }
           if ($manifest.minimumWindowsBuild -ne 17763) { throw 'Unexpected minimum Windows build.' }
-          if (-not ([string]$manifest.payload.url).StartsWith('https://')) { throw 'Payload URL is not HTTPS.' }
-          if ($manifest.payload.sha256 -ne 'f34397dae9ca7986ef5d8f9183c6d4ee355126d2c9b913dea6eee561835ada74') { throw 'Unexpected payload SHA-256 in manifest.' }
-          if ([int64]$manifest.payload.size -ne 69903997) { throw 'Unexpected payload size in manifest.' }
 
-          $payload = Join-Path $env:RUNNER_TEMP 'SyntexLauncher-0.16.6-win-x64.zip'
-          Invoke-WebRequest -Uri $manifest.payload.url -OutFile $payload -UseBasicParsing
-          if ((Get-Item $payload).Length -ne [int64]$manifest.payload.size) { throw 'Downloaded payload size does not match manifest.' }
+          switch ([string]$manifest.version) {
+            '0.16.6' {
+              $expectedPayloadUrl = 'https://github.com/Silverrain2004/SyntexLauncher-Distribution/releases/download/v0.16.6/SyntexLauncher-0.16.6-win-x64.zip'
+              $expectedPayloadSha = 'f34397dae9ca7986ef5d8f9183c6d4ee355126d2c9b913dea6eee561835ada74'
+              $expectedPayloadSize = 69903997L
+              $setupUrl = 'https://github.com/Silverrain2004/SyntexLauncher-Distribution/releases/download/v0.16.6/SyntexLauncherSetup-0.16.6-win-x64.exe'
+              $setupSha = '7d785b1b4205ccb9bc59ab630bebd93a9853ba8f4bbf491f8315091e12241c17'
+              $setupSize = 331776L
+              $setupName = 'SyntexLauncherSetup-0.16.6-win-x64.exe'
+            }
+            '0.16.7' {
+              $expectedPayloadUrl = 'https://github.com/Silverrain2004/SyntexLauncher-Distribution/releases/download/v0.16.7/SyntexLauncher-0.16.7-win-x64.zip'
+              $expectedPayloadSha = 'cc716db79bc5eb8cae80413aa2fe5cce519e05e3c2b12b9e11ae943c1780207f'
+              $expectedPayloadSize = 70090490L
+              $setupUrl = 'https://github.com/Silverrain2004/SyntexLauncher-Distribution/releases/download/v0.16.7/SyntexSetup-0.16.7-x64.exe'
+              $setupSha = '3b2bd876de661a8ee73745ede4f1a4ceccb8b4199f88080d62098878fc8b8000'
+              $setupSize = 394752L
+              $setupName = 'SyntexSetup-0.16.7-x64.exe'
+            }
+            default { throw "Unsupported stable manifest version: $($manifest.version)" }
+          }
+
+          if ([string]$manifest.payload.url -cne $expectedPayloadUrl) { throw "Unexpected payload URL for $($manifest.version): $($manifest.payload.url)" }
+          if ([string]$manifest.payload.sha256 -cne $expectedPayloadSha) { throw 'Unexpected payload SHA-256 in manifest.' }
+          if ([int64]$manifest.payload.size -ne $expectedPayloadSize) { throw 'Unexpected payload size in manifest.' }
+
+          "EXPECTED_PAYLOAD_URL=$expectedPayloadUrl" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          "EXPECTED_PAYLOAD_SHA=$expectedPayloadSha" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          "EXPECTED_PAYLOAD_SIZE=$expectedPayloadSize" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          "SETUP_URL=$setupUrl" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          "SETUP_SHA=$setupSha" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          "SETUP_SIZE=$setupSize" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          "SETUP_NAME=$setupName" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          Write-Host "STABLE CONTRACT RESOLVED · version $($manifest.version)"
+
+      - name: Validate manifest and immutable release payload
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $payload = Join-Path $env:RUNNER_TEMP 'SyntexLauncher-stable-win-x64.zip'
+          Invoke-WebRequest -Uri $env:EXPECTED_PAYLOAD_URL -OutFile $payload -UseBasicParsing
+          if ((Get-Item $payload).Length -ne [int64]$env:EXPECTED_PAYLOAD_SIZE) { throw 'Downloaded payload size does not match manifest contract.' }
           $payloadHash = (Get-FileHash $payload -Algorithm SHA256).Hash.ToLowerInvariant()
-          if ($payloadHash -ne $manifest.payload.sha256) { throw "Downloaded payload SHA-256 mismatch: $payloadHash" }
+          if ($payloadHash -ne $env:EXPECTED_PAYLOAD_SHA) { throw "Downloaded payload SHA-256 mismatch: $payloadHash" }
           Write-Host "PUBLIC PAYLOAD PASS · $((Get-Item $payload).Length) bytes · SHA256 $payloadHash"
 
       - name: Validate immutable public setup asset
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $setupUrl = 'https://github.com/Silverrain2004/SyntexLauncher-Distribution/releases/download/v0.16.6/SyntexLauncherSetup-0.16.6-win-x64.exe'
-          $setup = Join-Path $env:RUNNER_TEMP 'SyntexLauncherSetup-0.16.6-win-x64.exe'
-          Invoke-WebRequest -Uri $setupUrl -OutFile $setup -UseBasicParsing
-          if ((Get-Item $setup).Length -ne 331776) { throw "Unexpected public setup size: $((Get-Item $setup).Length)" }
+          $setup = Join-Path $env:RUNNER_TEMP $env:SETUP_NAME
+          Invoke-WebRequest -Uri $env:SETUP_URL -OutFile $setup -UseBasicParsing
+          if ((Get-Item $setup).Length -ne [int64]$env:SETUP_SIZE) { throw "Unexpected public setup size: $((Get-Item $setup).Length)" }
           $setupHash = (Get-FileHash $setup -Algorithm SHA256).Hash.ToLowerInvariant()
-          if ($setupHash -ne '7d785b1b4205ccb9bc59ab630bebd93a9853ba8f4bbf491f8315091e12241c17') { throw "Public setup SHA-256 mismatch: $setupHash" }
+          if ($setupHash -ne $env:SETUP_SHA) { throw "Public setup SHA-256 mismatch: $setupHash" }
           $bytes = [IO.File]::ReadAllBytes($setup)
           if ($bytes[0] -ne 0x4D -or $bytes[1] -ne 0x5A) { throw 'Public setup is not a PE executable.' }
           $pe = [BitConverter]::ToInt32($bytes, 0x3C)
           $machine = [BitConverter]::ToUInt16($bytes, $pe + 4)
           if ($machine -ne 0x8664) { throw ("Expected AMD64 PE machine 0x8664, got 0x{0:X4}" -f $machine) }
-          Write-Host "PUBLIC SETUP ASSET PASS · 331776 bytes · x64 · SHA256 $setupHash"
+          Write-Host "PUBLIC SETUP ASSET PASS · $((Get-Item $setup).Length) bytes · x64 · SHA256 $setupHash"
