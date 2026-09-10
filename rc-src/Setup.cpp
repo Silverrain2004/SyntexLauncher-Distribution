@@ -682,8 +682,6 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
         std::wstring error;
         const bool ok = InstallCore(target, true, false, repair, error);
         if (!ok) { WriteSetupLog(L"CI install E2E: " + error); return 5; }
-        std::error_code ec;
-        fs::remove_all(target, ec);
         return 0;
     }
     if (argv) LocalFree(argv);
