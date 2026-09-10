@@ -89,6 +89,17 @@ progress(86, L"Laufender Syntex Launcher wird für Installation/Aktualisierung b
     if (!SyntexSetupRepair::Begin(root, stage, transaction, error)) { cleanup(); return false; }
 '@
 $s=[regex]::Replace($s,$pattern,$replacement,1)
+$ciAnchor='    if (argv && argc == 3 && _wcsicmp(argv[1], L"--ci-install") == 0) {'
+if(-not $s.Contains($ciAnchor)){throw 'CI install anchor missing'}
+$ciStop=@'
+    if (argv && argc == 3 && _wcsicmp(argv[1], L"--ci-stop-launcher") == 0) {
+        const fs::path target(argv[2]);
+        LocalFree(argv);
+        std::wstring stopError;
+        return StopLauncherProgramProcesses(target, stopError) ? 0 : 6;
+    }
+'@
+$s=$s.Replace($ciAnchor,$ciStop+$ciAnchor)
 $s=$s.Replace('Syntex Launcher Setup 0.16.6 RC1','Syntex Launcher Setup 0.16.7')
 $s=$s.Replace('Syntex Launcher Setup 0.16.6','Syntex Launcher Setup 0.16.7')
 $s=$s.Replace('SyntexLauncherSetup/0.16.6-RC1','SyntexLauncherSetup/0.16.7')
