@@ -1,0 +1,235 @@
+name: Syntex 0.16.7 Deferred UI Network Setup
+
+on:
+  push:
+    branches: ['fix/0.16.7-setup-process-shutdown-v2']
+    paths:
+      - '.github/workflows/0167-deferred-ui-network-setup.yml'
+      - 'scripts/Patch-SetupProcessShutdown.ps1'
+      - 'rc-src/Setup.cpp'
+      - 'rc-src/RepairTransaction.h'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  network-e2e:
+    runs-on: windows-latest
+    timeout-minutes: 25
+    env:
+      SOURCE_RUN_ID: '34513220425'
+      SOURCE_ARTIFACT_NAME: Syntex-0.16.7-deferred-ui-setup-test
+      PAYLOAD_SOURCE_NAME: SyntexLauncher-0.16.7-deferred-ui-ci-win-x64.zip
+      PAYLOAD_ASSET_NAME: SyntexLauncher-0.16.7-deferred-ui-win-x64.zip
+      PAYLOAD_SHA: 1d3a3474bf8d4c412b5cc074551d348a7dfa6453dcf04adf71ddf914a6ad076c
+      PAYLOAD_SIZE: '70064433'
+      PRERELEASE_TAG: v0.16.7-ci-deferred-ui-34513220425
+      BASE_URL: https://github.com/Silverrain2004/SyntexLauncher-Distribution/releases/download/v0.16.6/SyntexLauncher-0.16.6-win-x64.zip
+      BASE_SHA: f34397dae9ca7986ef5d8f9183c6d4ee355126d2c9b913dea6eee561835ada74
+      BASE_SIZE: '69903997'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Locate Visual C++ x64 toolchain
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $vswhere=Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+          $vs=&$vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if([string]::IsNullOrWhiteSpace($vs)){throw 'VC++ x64 tools missing'}
+          "VSDEVCMD=$(Join-Path $vs 'Common7\Tools\VsDevCmd.bat')"|Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Download exact green source artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ env.SOURCE_ARTIFACT_NAME }}
+          path: ${{ runner.temp }}/deferred-source
+          github-token: ${{ github.token }}
+          repository: Silverrain2004/SyntexLauncher-Distribution
+          run-id: ${{ env.SOURCE_RUN_ID }}
+
+      - name: Verify exact payload and immutable 0.16.6
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $work=Join-Path $env:RUNNER_TEMP 'deferred-network-setup'
+          $dist=Join-Path $work 'dist'
+          New-Item -ItemType Directory -Force $work,$dist|Out-Null
+          $payload=Join-Path $env:RUNNER_TEMP "deferred-source\$env:PAYLOAD_SOURCE_NAME"
+          if(-not(Test-Path $payload)){throw "Source payload missing: $payload"}
+          if((Get-Item $payload).Length-ne[int64]$env:PAYLOAD_SIZE){throw 'Source payload size mismatch'}
+          $sha=(Get-FileHash $payload -Algorithm SHA256).Hash.ToLowerInvariant()
+          if($sha-ne$env:PAYLOAD_SHA){throw "Source payload hash mismatch: $sha"}
+          $asset=Join-Path $work $env:PAYLOAD_ASSET_NAME
+          Copy-Item $payload $asset
+          $base=Join-Path $work 'base-0.16.6.zip'
+          Invoke-WebRequest $env:BASE_URL -OutFile $base -UseBasicParsing
+          if((Get-Item $base).Length-ne[int64]$env:BASE_SIZE){throw 'Immutable 0.16.6 size changed'}
+          if((Get-FileHash $base -Algorithm SHA256).Hash.ToLowerInvariant()-ne$env:BASE_SHA){throw 'Immutable 0.16.6 hash changed'}
+          "WORK=$work"|Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          "DIST=$dist"|Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          "PAYLOAD_FILE=$asset"|Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          "BASE_ZIP=$base"|Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          Write-Host 'EXACT_GREEN_PAYLOAD_AND_IMMUTABLE_0166_PASS'
+
+      - name: Create immutable CI prerelease once or verify existing
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          gh release view $env:PRERELEASE_TAG --repo Silverrain2004/SyntexLauncher-Distribution *> $null
+          if($LASTEXITCODE-ne0){
+            gh release create $env:PRERELEASE_TAG $env:PAYLOAD_FILE --repo Silverrain2004/SyntexLauncher-Distribution --prerelease --title 'Syntex 0.16.7 deferred UI CI candidate' --notes 'Immutable CI candidate for real Setup/network/startup validation. Not a stable user release.'
+            if($LASTEXITCODE-ne0){throw "CI prerelease creation failed: $LASTEXITCODE"}
+            Write-Host 'CI_PRERELEASE_CREATED_ONCE'
+          }else{
+            Write-Host 'CI_PRERELEASE_ALREADY_EXISTS_VERIFY_ONLY'
+          }
+          $json=gh release view $env:PRERELEASE_TAG --repo Silverrain2004/SyntexLauncher-Distribution --json tagName,isDraft,isPrerelease,assets | ConvertFrom-Json
+          if($json.tagName-ne$env:PRERELEASE_TAG-or$json.isDraft-or-not$json.isPrerelease){throw 'CI prerelease metadata mismatch'}
+          $asset=$json.assets|Where-Object{$_.name-eq$env:PAYLOAD_ASSET_NAME}
+          if(-not$asset){throw 'Expected immutable CI payload asset missing'}
+          Write-Host 'CI_PRERELEASE_METADATA_PASS'
+
+      - name: Re-download published candidate and verify exact bytes
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $url="https://github.com/Silverrain2004/SyntexLauncher-Distribution/releases/download/$env:PRERELEASE_TAG/$env:PAYLOAD_ASSET_NAME"
+          $published=Join-Path $env:WORK 'published-candidate.zip'
+          Invoke-WebRequest $url -OutFile $published -UseBasicParsing
+          if((Get-Item $published).Length-ne[int64]$env:PAYLOAD_SIZE){throw 'Published candidate size mismatch'}
+          $sha=(Get-FileHash $published -Algorithm SHA256).Hash.ToLowerInvariant()
+          if($sha-ne$env:PAYLOAD_SHA){throw "Published candidate hash mismatch: $sha"}
+          "PAYLOAD_URL=$url"|Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          Write-Host 'PUBLISHED_CANDIDATE_EXACT_BYTES_PASS'
+
+      - name: Build real network Setup
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          ./scripts/Patch-SetupProcessShutdown.ps1 -SetupSource ./rc-src/Setup.cpp
+          @('#pragma once',("static constexpr wchar_t PAYLOAD_URL[] = L`"{0}`";" -f $env:PAYLOAD_URL),("static constexpr wchar_t PAYLOAD_SHA256[] = L`"{0}`";" -f $env:PAYLOAD_SHA),("static constexpr unsigned long long PAYLOAD_SIZE = {0}ULL;" -f $env:PAYLOAD_SIZE))|Set-Content ./rc-src/PayloadContract.h -Encoding utf8
+          $setup=Join-Path $env:DIST 'SyntexLauncher-Setup-0.16.7-x64-DEFERRED-UI-NETWORK.exe'
+          $cmd=Join-Path $env:RUNNER_TEMP 'build-network-setup.cmd'
+          @('@echo on',"call `"$env:VSDEVCMD`" -arch=x64 -host_arch=x64",'if errorlevel 1 exit /b %errorlevel%',"cl.exe /nologo /DNOMINMAX /utf-8 /std:c++20 /EHsc /W4 /O2 /MT /I`"$env:GITHUB_WORKSPACE\rc-src`" `"$env:GITHUB_WORKSPACE\rc-src\Setup.cpp`" /Fe:`"$setup`" /link /SUBSYSTEM:WINDOWS /MACHINE:X64 winhttp.lib bcrypt.lib shell32.lib ole32.lib user32.lib gdi32.lib advapi32.lib comctl32.lib uxtheme.lib",'exit /b %errorlevel%')|Set-Content $cmd -Encoding ascii
+          &cmd.exe /d /c $cmd
+          if($LASTEXITCODE-ne0){throw "Network Setup build failed: $LASTEXITCODE"}
+          "FINAL_SETUP=$setup"|Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          Write-Host "FINAL_SETUP_SHA=$((Get-FileHash $setup -Algorithm SHA256).Hash.ToLowerInvariant())"
+          Write-Host "FINAL_SETUP_SIZE=$((Get-Item $setup).Length)"
+
+      - name: Verify real Setup selftests and AMD64
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          foreach($arg in @('--self-test','--repair-self-test','--log-self-test')){
+            $p=Start-Process $env:FINAL_SETUP -ArgumentList $arg -PassThru -Wait
+            if($p.ExitCode-ne0){throw "$arg failed: $($p.ExitCode)"}
+          }
+          $b=[IO.File]::ReadAllBytes($env:FINAL_SETUP)
+          if($b[0]-ne0x4d-or$b[1]-ne0x5a){throw 'MZ missing'}
+          $lf=[BitConverter]::ToInt32($b,0x3c)
+          if([BitConverter]::ToUInt16($b,$lf+4)-ne0x8664){throw 'Setup is not AMD64'}
+          Write-Host 'REAL_NETWORK_SETUP_X64_SELFTEST_PASS'
+
+      - name: Real network repair closes running 0.16.6 and visibly starts 0.16.7
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $root=Join-Path $env:WORK 'network-repair-root'
+          Expand-Archive $env:BASE_ZIP $root -Force
+          foreach($d in @('storage','data','instances','runtimes')){New-Item -ItemType Directory -Force (Join-Path $root $d)|Out-Null;"KEEP-$d"|Set-Content (Join-Path $root "$d\keep.txt") -Encoding ascii}
+          $old=Start-Process (Join-Path $root 'SyntexLauncher.exe') -WorkingDirectory $root -PassThru
+          Start-Sleep -Seconds 3
+          if($old.HasExited){throw "0.16.6 launcher exited too early: $($old.ExitCode)"}
+          $oldPid=$old.Id
+          $setup=Start-Process $env:FINAL_SETUP -ArgumentList @('--ci-install',"`"$root`"") -PassThru
+          if(-not$setup.WaitForExit(180000)){try{$setup.Kill($true)}catch{};throw 'Real network Setup exceeded 180 seconds'}
+          if($setup.ExitCode-ne0){Get-ChildItem (Join-Path $root 'storage\logs') -Recurse -File -ErrorAction SilentlyContinue|ForEach-Object{Write-Host "---$($_.FullName)---";Get-Content $_.FullName -Raw|Write-Host};throw "Real network Setup failed: $($setup.ExitCode)"}
+          if(Get-Process -Id $oldPid -ErrorAction SilentlyContinue){throw 'Old 0.16.6 launcher survived Setup'}
+          foreach($d in @('storage','data','instances','runtimes')){if((Get-Content (Join-Path $root "$d\keep.txt") -Raw).Trim()-ne"KEEP-$d"){throw "Network repair changed $d"}}
+          $logs=Join-Path $root 'storage\logs\launcher-startup'
+          $text=(Get-ChildItem $logs -File|ForEach-Object{Get-Content $_.FullName -Raw})-join"`n"
+          if($text-notmatch'Startprüfung erfolgreich: sichtbares Launcher-Fenster erkannt'){throw 'Network repair visible-start marker missing'}
+          "NETWORK_ROOT=$root"|Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          Write-Host 'REAL_NETWORK_SETUP_AUTO_CLOSE_VISIBLE_START_USER_DATA_PASS'
+
+      - name: Repeat real network repair while 0.16.7 is running
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $root=$env:NETWORK_ROOT
+          $before=(Get-ChildItem (Join-Path $root 'storage\logs\launcher-startup') -File).Count
+          $setup=Start-Process $env:FINAL_SETUP -ArgumentList @('--ci-install',"`"$root`"") -PassThru
+          if(-not$setup.WaitForExit(180000)){try{$setup.Kill($true)}catch{};throw 'Second network repair exceeded 180 seconds'}
+          if($setup.ExitCode-ne0){throw "Second network repair failed: $($setup.ExitCode)"}
+          $after=(Get-ChildItem (Join-Path $root 'storage\logs\launcher-startup') -File).Count
+          if($after-le$before){throw 'Second network repair produced no new startup health log'}
+          foreach($d in @('storage','data','instances','runtimes')){if((Get-Content (Join-Path $root "$d\keep.txt") -Raw).Trim()-ne"KEEP-$d"){throw "Second network repair changed $d"}}
+          Get-Process SyntexLauncher -ErrorAction SilentlyContinue|Stop-Process -Force -ErrorAction SilentlyContinue
+          Write-Host 'SECOND_REAL_NETWORK_REPAIR_VISIBLE_START_USER_DATA_PASS'
+
+      - name: Build bad local payload and rollback-test Setup
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $badRoot=Join-Path $env:WORK 'bad-payload'
+          Expand-Archive $env:PAYLOAD_FILE $badRoot -Force
+          $badCpp=Join-Path $env:WORK 'BadChild.cpp'
+          'int WINAPI wWinMain(void*,void*,wchar_t*,int){return 42;}'|Set-Content $badCpp -Encoding ascii
+          $badChild=Join-Path $badRoot 'app\SyntexLauncher.exe'
+          $cmd=Join-Path $env:RUNNER_TEMP 'build-bad-child.cmd'
+          @('@echo on',"call `"$env:VSDEVCMD`" -arch=x64 -host_arch=x64",'if errorlevel 1 exit /b %errorlevel%',"cl.exe /nologo /O2 /MT `"$badCpp`" /Fe:`"$badChild`" /link /SUBSYSTEM:WINDOWS /MACHINE:X64 user32.lib",'exit /b %errorlevel%')|Set-Content $cmd -Encoding ascii
+          &cmd.exe /d /c $cmd
+          if($LASTEXITCODE-ne0){throw 'Bad child build failed'}
+          $badZip=Join-Path $env:WORK 'bad-local-payload.zip'
+          Push-Location $badRoot
+          try{&7z a -tzip -mx=1 -y $badZip '.\*'|Out-Host}finally{Pop-Location}
+          if($LASTEXITCODE-ne0){throw 'Bad payload zip failed'}
+          $badSha=(Get-FileHash $badZip -Algorithm SHA256).Hash.ToLowerInvariant();$badSize=(Get-Item $badZip).Length
+          @('#pragma once',("static constexpr wchar_t PAYLOAD_URL[] = L`"https://ci.invalid/bad.zip`";"),("static constexpr wchar_t PAYLOAD_SHA256[] = L`"{0}`";" -f $badSha),("static constexpr unsigned long long PAYLOAD_SIZE = {0}ULL;" -f $badSize))|Set-Content ./rc-src/PayloadContract.h -Encoding utf8
+          $badSetup=Join-Path $env:DIST 'SyntexSetup-0.16.7-x64-ROLLBACK-TEST.exe'
+          $cmd2=Join-Path $env:RUNNER_TEMP 'build-bad-setup.cmd'
+          @('@echo on',"call `"$env:VSDEVCMD`" -arch=x64 -host_arch=x64",'if errorlevel 1 exit /b %errorlevel%',"cl.exe /nologo /DNOMINMAX /utf-8 /std:c++20 /EHsc /W4 /O2 /MT /I`"$env:GITHUB_WORKSPACE\rc-src`" `"$env:GITHUB_WORKSPACE\rc-src\Setup.cpp`" /Fe:`"$badSetup`" /link /SUBSYSTEM:WINDOWS /MACHINE:X64 winhttp.lib bcrypt.lib shell32.lib ole32.lib user32.lib gdi32.lib advapi32.lib comctl32.lib uxtheme.lib",'exit /b %errorlevel%')|Set-Content $cmd2 -Encoding ascii
+          &cmd.exe /d /c $cmd2
+          if($LASTEXITCODE-ne0){throw 'Rollback Setup build failed'}
+          "BAD_ZIP=$badZip"|Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          "BAD_SETUP=$badSetup"|Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Real failed repair automatically rolls back and preserves data
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $root=Join-Path $env:WORK 'rollback-root'
+          Expand-Archive $env:BASE_ZIP $root -Force
+          foreach($d in @('storage','data','instances','runtimes')){New-Item -ItemType Directory -Force (Join-Path $root $d)|Out-Null;"KEEP-$d"|Set-Content (Join-Path $root "$d\keep.txt") -Encoding ascii}
+          $oldHash=(Get-FileHash (Join-Path $root 'SyntexLauncher.exe') -Algorithm SHA256).Hash.ToLowerInvariant()
+          $p=Start-Process $env:BAD_SETUP -ArgumentList @('--ci-install-local',"`"$root`"","`"$env:BAD_ZIP`"") -PassThru
+          if(-not$p.WaitForExit(180000)){try{$p.Kill($true)}catch{};throw 'Rollback test exceeded 180 seconds'}
+          if($p.ExitCode-eq0){throw 'Rollback-test Setup unexpectedly succeeded'}
+          $restored=(Get-FileHash (Join-Path $root 'SyntexLauncher.exe') -Algorithm SHA256).Hash.ToLowerInvariant()
+          if($restored-ne$oldHash){throw 'Rollback did not restore original host'}
+          foreach($d in @('storage','data','instances','runtimes')){if((Get-Content (Join-Path $root "$d\keep.txt") -Raw).Trim()-ne"KEEP-$d"){throw "Rollback changed $d"}}
+          if(Test-Path (Join-Path $root '.syntex-repair-backup')){throw 'Rollback backup directory remained after successful restore'}
+          Write-Host 'REAL_FAILED_REPAIR_ROLLBACK_USER_DATA_PASS'
+
+      - name: Verify immutable 0.16.6 again
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $check=Join-Path $env:WORK 'base-final-check.zip'
+          Invoke-WebRequest $env:BASE_URL -OutFile $check -UseBasicParsing
+          if((Get-Item $check).Length-ne[int64]$env:BASE_SIZE-or(Get-FileHash $check -Algorithm SHA256).Hash.ToLowerInvariant()-ne$env:BASE_SHA){throw 'Immutable 0.16.6 changed during validation'}
+          Write-Host 'IMMUTABLE_0166_POST_VALIDATION_PASS'
+
+      - name: Upload real network Setup only after all gates pass
+        uses: actions/upload-artifact@v4
+        with:
+          name: SyntexLauncher-Setup-0.16.7-x64-deferred-ui-network-verified
+          path: ${{ env.FINAL_SETUP }}
+          if-no-files-found: error
+          retention-days: 7
