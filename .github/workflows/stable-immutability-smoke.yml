@@ -1,0 +1,48 @@
+name: Stable Release Immutability Smoke
+
+on:
+  push:
+    branches: ['feat/0.16.7-self-update']
+    paths:
+      - 'scripts/Assert-NewStableVersion.ps1'
+      - '.github/workflows/stable-immutability-smoke.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  immutable-stable-guard:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/0.16.7-self-update
+
+      - name: Existing Stable 0.16.6 must be rejected
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $output = & ./scripts/Assert-NewStableVersion.ps1 -Repository '${{ github.repository }}' -Version '0.16.6' 2>&1 | Out-String
+          $code = $LASTEXITCODE
+          Write-Host $output
+          if ($code -eq 0) { throw 'Immutability guard incorrectly allowed existing Stable v0.16.6.' }
+          if ($output -notmatch 'IMMUTABLE_STABLE_REJECTED') { throw 'Existing Stable rejection was not fail-closed for the expected reason.' }
+          Write-Host 'IMMUTABLE_EXISTING_STABLE_REJECTION_PASS'
+
+      - name: Unclaimed synthetic version must pass without mutation
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $version = "99.99.$env:GITHUB_RUN_ID"
+          & ./scripts/Assert-NewStableVersion.ps1 -Repository '${{ github.repository }}' -Version $version
+          if ($LASTEXITCODE -ne 0) { throw 'Immutability guard rejected an unclaimed synthetic version.' }
+          $tag = "v$version"
+          gh release view $tag *> $null
+          if ($LASTEXITCODE -eq 0) { throw 'Smoke test unexpectedly created a release.' }
+          gh api --silent "repos/${{ github.repository }}/git/ref/tags/$tag" 2>$null
+          if ($LASTEXITCODE -eq 0) { throw 'Smoke test unexpectedly created a git tag.' }
+          Write-Host 'IMMUTABLE_NEW_VERSION_NONMUTATING_PASS'
