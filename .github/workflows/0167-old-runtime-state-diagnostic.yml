@@ -1,0 +1,101 @@
+name: Syntex 0.16.7 Old Runtime State Diagnostic
+
+on:
+  push:
+    branches: ['fix/0.16.7-setup-process-shutdown-v2']
+    paths:
+      - '.github/workflows/0167-old-runtime-state-diagnostic.yml'
+      - 'rc-src/PatchManagedStartup.cs'
+      - 'rc-src/LauncherHost.cpp'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    runs-on: windows-latest
+    timeout-minutes: 10
+    env:
+      BASE_URL: https://github.com/Silverrain2004/SyntexLauncher-Distribution/releases/download/v0.16.6/SyntexLauncher-0.16.6-win-x64.zip
+      BASE_SHA: f34397dae9ca7986ef5d8f9183c6d4ee355126d2c9b913dea6eee561835ada74
+      BASE_SIZE: '69903997'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.400'
+
+      - name: Prepare old runtime root and new candidate
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $work=Join-Path $env:RUNNER_TEMP 'old-runtime-state-diag'
+          $zip=Join-Path $work 'base.zip';$candidate=Join-Path $work 'candidate';$root=Join-Path $work 'repair-root'
+          New-Item -ItemType Directory -Force $work,$candidate,$root|Out-Null
+          Invoke-WebRequest $env:BASE_URL -OutFile $zip -UseBasicParsing
+          if((Get-Item $zip).Length-ne[int64]$env:BASE_SIZE-or(Get-FileHash $zip -Algorithm SHA256).Hash.ToLowerInvariant()-ne$env:BASE_SHA){throw 'immutable baseline changed'}
+          Expand-Archive $zip $candidate -Force;Expand-Archive $zip $root -Force
+          "CANDIDATE=$candidate"|Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          "REPAIR_ROOT=$root"|Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Patch and build new 0.16.7 candidate
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $patchDir=Join-Path $env:RUNNER_TEMP 'patcher';New-Item -ItemType Directory -Force $patchDir|Out-Null
+          Copy-Item .\rc-src\PatchManagedStartup.cs (Join-Path $patchDir 'Program.cs')
+          @'
+          <Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><OutputType>Exe</OutputType><TargetFramework>net10.0</TargetFramework><ImplicitUsings>enable</ImplicitUsings><Nullable>enable</Nullable></PropertyGroup><ItemGroup><PackageReference Include="Mono.Cecil" Version="0.11.6" /></ItemGroup></Project>
+          '@|Set-Content (Join-Path $patchDir 'Patcher.csproj') -Encoding utf8
+          $o=dotnet run --project (Join-Path $patchDir 'Patcher.csproj') -c Release -- (Join-Path $env:CANDIDATE 'app');$o|Write-Host
+          if($LASTEXITCODE-ne0-or($o-join"`n")-notmatch'PATCH_OK_AVALONIA_DISPATCHER:'){throw 'managed patch failed'}
+          $vswhere=Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe';$vs=&$vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          $dev=Join-Path $vs 'Common7\Tools\VsDevCmd.bat';$cmd=Join-Path $env:RUNNER_TEMP 'build-host.cmd'
+          @('@echo on',"call `"$dev`" -arch=x64 -host_arch=x64",'if errorlevel 1 exit /b %errorlevel%',"cl.exe /nologo /DNOMINMAX /utf-8 /std:c++20 /EHsc /W4 /O1 /Os /GL /MT `"$env:GITHUB_WORKSPACE\rc-src\LauncherHost.cpp`" /Fe:`"$env:CANDIDATE\SyntexLauncher.exe`" /link /SUBSYSTEM:WINDOWS /MACHINE:X64 /LTCG /OPT:REF /OPT:ICF winhttp.lib bcrypt.lib shell32.lib user32.lib",'exit /b %errorlevel%')|Set-Content $cmd -Encoding ascii
+          &cmd.exe /d /c $cmd;if($LASTEXITCODE-ne0){throw 'host build failed'}
+
+      - name: Run real 0.16.6 briefly and capture owned process/runtime state
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop';$root=$env:REPAIR_ROOT
+          $old=Start-Process (Join-Path $root 'SyntexLauncher.exe') -WorkingDirectory $root -PassThru
+          Start-Sleep -Seconds 3
+          if($old.HasExited){throw "0.16.6 root launcher exited unexpectedly: $($old.ExitCode)"}
+          $rootAbs=[IO.Path]::GetFullPath($root).TrimEnd('\')
+          $owned=Get-CimInstance Win32_Process|Where-Object{ $_.ExecutablePath -and (([IO.Path]::GetFullPath($_.ExecutablePath)-ieq(Join-Path $rootAbs 'SyntexLauncher.exe')) -or ([IO.Path]::GetFullPath($_.ExecutablePath).StartsWith((Join-Path $rootAbs 'app')+'\',[StringComparison]::OrdinalIgnoreCase)))}
+          $owned|ForEach-Object{Write-Host ("OWNED_BEFORE_STOP PID={0} PPID={1} NAME={2} PATH={3}" -f $_.ProcessId,$_.ParentProcessId,$_.Name,$_.ExecutablePath)}
+          if(-not$owned){throw 'no owned 0.16.6 process found'}
+          Get-ChildItem $root -Force|ForEach-Object{Write-Host ("ROOT_AFTER_0166 {0} {1}" -f $_.PSIsContainer,$_.Name)}
+          if(Test-Path (Join-Path $root 'storage')){Get-ChildItem (Join-Path $root 'storage') -Recurse -File -ErrorAction SilentlyContinue|Select-Object -First 50|ForEach-Object{Write-Host ("STORAGE_AFTER_0166 {0}" -f $_.FullName.Substring($root.Length+1))}}
+          $owned|ForEach-Object{Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue}
+          $deadline=(Get-Date).AddSeconds(10)
+          do{
+            Start-Sleep -Milliseconds 100
+            $left=Get-CimInstance Win32_Process|Where-Object{$_.ExecutablePath -and (([IO.Path]::GetFullPath($_.ExecutablePath)-ieq(Join-Path $rootAbs 'SyntexLauncher.exe')) -or([IO.Path]::GetFullPath($_.ExecutablePath).StartsWith((Join-Path $rootAbs 'app')+'\',[StringComparison]::OrdinalIgnoreCase)))}
+          }while($left-and(Get-Date)-lt$deadline)
+          if($left){$left|ForEach-Object{Write-Host "LEFT_AFTER_STOP $($_.ProcessId) $($_.ExecutablePath)"};throw 'owned launcher process survived stop'}
+          Write-Host 'OLD_RUNTIME_STARTED_AND_FULLY_STOPPED_PASS'
+
+      - name: Replace program files exactly like prepared repair transaction
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop';$root=$env:REPAIR_ROOT
+          $preserved=@('storage','data','instances','runtimes','cache','downloads','logs','creator','diagnostics','temp','updates','fehleranalysen','saves','screenshots','resourcepacks','shaderpacks','config','profiles','accounts','backups')
+          foreach($d in @('data','instances','runtimes')){New-Item -ItemType Directory -Force (Join-Path $root $d)|Out-Null;"KEEP-$d"|Set-Content (Join-Path $root "$d\keep.txt") -Encoding ascii}
+          $backup=Join-Path $root '.syntex-repair-backup';New-Item -ItemType Directory -Force $backup|Out-Null
+          Get-ChildItem $root -Force|Where-Object{$_.Name-ne'.syntex-repair-backup'-and$preserved-notcontains$_.Name.ToLowerInvariant()}|ForEach-Object{Move-Item $_.FullName (Join-Path $backup $_.Name)}
+          Get-ChildItem $env:CANDIDATE -Force|Where-Object{$preserved-notcontains$_.Name.ToLowerInvariant()}|ForEach-Object{Copy-Item $_.FullName (Join-Path $root $_.Name) -Recurse -Force}
+          Write-Host 'OLD_RUNTIME_MANUAL_TRANSACTION_PREPARED_PASS'
+
+      - name: Start new 0.16.7 five times after actual old runtime was killed
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop';$root=$env:REPAIR_ROOT
+          for($i=1;$i-le5;$i++){
+            $p=Start-Process (Join-Path $root 'SyntexLauncher.exe') -ArgumentList '--ci-gui-self-test' -WorkingDirectory $root -PassThru
+            if(-not$p.WaitForExit(60000)){try{$p.Kill($true)}catch{};throw "post-old-runtime start $i timeout"}
+            if($p.ExitCode-ne0){Get-ChildItem (Join-Path $root 'storage\logs\launcher-startup') -File -ErrorAction SilentlyContinue|ForEach-Object{Write-Host "---$($_.Name)---";Get-Content $_.FullName -Raw|Write-Host};throw "post-old-runtime start $i exit $($p.ExitCode)"}
+            Write-Host "POST_OLD_RUNTIME_VISIBLE_START_${i}_PASS"
+          }
+          Write-Host 'POST_OLD_RUNTIME_VISIBLE_START_5X_PASS'
