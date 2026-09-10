@@ -71,7 +71,7 @@ jobs:
             [DllImport("user32.dll")] public static extern IntPtr SendMessage(IntPtr hwnd, uint msg, IntPtr wp, IntPtr lp);
             [DllImport("user32.dll")] public static extern bool EnumWindows(EnumWindowsProc callback, IntPtr lParam);
             [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr hwnd);
-            [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hwnd, out uint pid);
+            [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hwnd, out uint processId);
             [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetWindowText(IntPtr hwnd, StringBuilder text, int max);
           }
           '@
@@ -81,9 +81,9 @@ jobs:
             $callback = [SyntexUi+EnumWindowsProc]{
               param([IntPtr]$hwnd, [IntPtr]$lparam)
               if (-not [SyntexUi]::IsWindowVisible($hwnd)) { return $true }
-              [uint32]$pid = 0
-              [void][SyntexUi]::GetWindowThreadProcessId($hwnd, [ref]$pid)
-              if ($pid -eq $ExpectedPid) { $script:foundPidWindow = $hwnd; return $false }
+              [uint32]$windowPid = 0
+              [void][SyntexUi]::GetWindowThreadProcessId($hwnd, [ref]$windowPid)
+              if ($windowPid -eq $ExpectedPid) { $script:foundPidWindow = $hwnd; return $false }
               return $true
             }
             [void][SyntexUi]::EnumWindows($callback, [IntPtr]::Zero)
@@ -104,15 +104,15 @@ jobs:
             $callback = [SyntexUi+EnumWindowsProc]{
               param([IntPtr]$hwnd, [IntPtr]$lparam)
               if (-not [SyntexUi]::IsWindowVisible($hwnd)) { return $true }
-              [uint32]$pid = 0
-              [void][SyntexUi]::GetWindowThreadProcessId($hwnd, [ref]$pid)
-              if ($pid -eq $SetupPid) { return $true }
-              try { $proc = Get-Process -Id $pid -ErrorAction Stop } catch { return $true }
+              [uint32]$windowPid = 0
+              [void][SyntexUi]::GetWindowThreadProcessId($hwnd, [ref]$windowPid)
+              if ($windowPid -eq $SetupPid) { return $true }
+              try { $proc = Get-Process -Id $windowPid -ErrorAction Stop } catch { return $true }
               if ($proc.ProcessName -notlike 'SyntexLauncher*' -or $proc.ProcessName -like '*Setup*') { return $true }
               $title = New-Object Text.StringBuilder 512
               [void][SyntexUi]::GetWindowText($hwnd, $title, $title.Capacity)
               if ($title.Length -gt 0) {
-                $script:foundSyntexWindow = [pscustomobject]@{ Handle=$hwnd; ProcessId=$pid; ProcessName=$proc.ProcessName; Title=$title.ToString() }
+                $script:foundSyntexWindow = [pscustomobject]@{ Handle=$hwnd; ProcessId=$windowPid; ProcessName=$proc.ProcessName; Title=$title.ToString() }
                 return $false
               }
               return $true
