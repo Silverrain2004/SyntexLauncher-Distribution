@@ -2,7 +2,7 @@ param([Parameter(Mandatory=$true)][string]$SetupSource)
 $ErrorActionPreference='Stop'
 $s=Get-Content $SetupSource -Raw
 
-$pattern='static bool StopLauncherProgramProcesses\(const fs::path& root, std::wstring& error\) noexcept \{.*?\n\}\n\n// GUI health checks must not use CREATE_NO_WINDOW\.'
+$pattern='static bool StopLauncherProgramProcesses\(const fs::path& root, std::wstring& error\) noexcept \{.*?\r?\n\}\r?\n\r?\n// GUI health checks must not use CREATE_NO_WINDOW\.'
 if(-not [regex]::IsMatch($s,$pattern,[System.Text.RegularExpressions.RegexOptions]::Singleline)){
     throw 'Force-only StopLauncherProgramProcesses block not found'
 }
