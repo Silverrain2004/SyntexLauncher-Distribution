@@ -72,3 +72,5 @@ jobs:
           $text=($logs | ForEach-Object { Get-Content $_.FullName -Raw }) -join "`n"
           if($text -notmatch 'sichtbares Launcherfenster'){throw 'Real setup failure log did not record launcher-window healthcheck failure.'}
           Write-Host 'REAL_SETUP_TRANSACTIONAL_ROLLBACK_AND_USER_DATA_PRESERVATION_PASS'
+
+# Re-run after synchronizing the setup outer healthcheck timeout with the real LauncherHost guardian.
