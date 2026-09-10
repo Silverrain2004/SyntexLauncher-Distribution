@@ -41,16 +41,13 @@ jobs:
           "WORK=$work"|Out-File $env:GITHUB_ENV -Encoding utf8 -Append;"DIST=$dist"|Out-File $env:GITHUB_ENV -Encoding utf8 -Append;"BASE_ZIP=$base"|Out-File $env:GITHUB_ENV -Encoding utf8 -Append
           "GOOD_HOST_HASH=$((Get-FileHash (Join-Path $extract 'SyntexLauncher.exe') -Algorithm SHA256).Hash.ToLowerInvariant())"|Out-File $env:GITHUB_ENV -Encoding utf8 -Append
 
-      - name: Build good and bad x64 Setup from current source
+      - name: Build good and bad x64 Setup directly from current source
         shell: pwsh
         run: |
           $ErrorActionPreference='Stop'
-          $source=Get-Content .\rc-src\Setup.cpp -Raw
-          $pattern='(?ms)(if \(argv && argc == 3 && _wcsicmp\(argv\[1\], L"--ci-install"\) == 0\) \{.*?if \(!ok\) \{ WriteSetupLog\(L"CI install E2E: " \+ error\); return 5; \})\s*std::error_code ec;\s*fs::remove_all\(target, ec\);\s*return 0;'
-          $replacement='${1}'+[Environment]::NewLine+'        return 0;'
-          $source2=[regex]::Replace($source,$pattern,$replacement,1)
-          if($source2 -eq $source -or $source2.Contains('fs::remove_all(target, ec);')){throw 'Inspectable CI source transformation failed.'}
-          $src=Join-Path $env:RUNNER_TEMP 'Setup-final-v3.cpp';Set-Content $src $source2 -Encoding utf8
+          $src=Join-Path $env:GITHUB_WORKSPACE 'rc-src\Setup.cpp'
+          $source=Get-Content $src -Raw
+          if($source.Contains('fs::remove_all(target, ec);')){throw 'Current Setup source still deletes a successful CI install target.'}
           $vswhere=Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe';$vs=&$vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath;if([string]::IsNullOrWhiteSpace($vs)){throw 'VC++ x64 missing'};$dev=Join-Path $vs 'Common7\Tools\VsDevCmd.bat'
           function Build-Setup($url,$sha,$size,$out,$suffix){@('#pragma once',("static constexpr wchar_t PAYLOAD_URL[] = L`"{0}`";" -f $url),("static constexpr wchar_t PAYLOAD_SHA256[] = L`"{0}`";" -f $sha),("static constexpr unsigned long long PAYLOAD_SIZE = {0}ULL;" -f $size))|Set-Content .\rc-src\PayloadContract.h -Encoding utf8;$cmd=Join-Path $env:RUNNER_TEMP "build-setup-v3-$suffix.cmd";@('@echo on',"call `"$dev`" -arch=x64 -host_arch=x64",'if errorlevel 1 exit /b %errorlevel%',"cl.exe /nologo /DNOMINMAX /utf-8 /std:c++20 /EHsc /W4 /O2 /MT /I`"$env:GITHUB_WORKSPACE\rc-src`" `"$src`" /Fe:`"$out`" /link /SUBSYSTEM:WINDOWS /MACHINE:X64 winhttp.lib bcrypt.lib shell32.lib ole32.lib user32.lib gdi32.lib advapi32.lib comctl32.lib uxtheme.lib",'exit /b %errorlevel%')|Set-Content $cmd -Encoding ascii;&cmd.exe /d /c $cmd;if($LASTEXITCODE -ne 0){throw "Setup $suffix build failed"}}
           $good=Join-Path $env:DIST 'SyntexSetup-0.16.7-x64.exe';$bad=Join-Path $env:DIST 'SyntexSetup-0.16.7-x64-rollback-test.exe';Build-Setup $env:GOOD_URL $env:GOOD_SHA $env:GOOD_SIZE $good 'good';Build-Setup $env:BAD_URL $env:BAD_SHA $env:BAD_SIZE $bad 'bad'
@@ -90,7 +87,7 @@ jobs:
       - name: Upload verified final x64 setup
         uses: actions/upload-artifact@v4
         with:
-          name: SyntexSetup-0.16.7-x64-final-v3
+          name: SyntexSetup-0.16.7-x64-final-v3-current-source
           path: ${{ env.FINAL_SETUP }}
           if-no-files-found: error
           retention-days: 7
