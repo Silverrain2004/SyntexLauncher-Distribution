@@ -105,9 +105,9 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference='Stop'
-          $host=Join-Path $env:CANDIDATE 'SyntexLauncher.exe'
+          $launcherHost=Join-Path $env:CANDIDATE 'SyntexLauncher.exe'
           for($i=1;$i-le3;$i++){
-            $p=Start-Process $host -ArgumentList '--ci-gui-self-test' -WorkingDirectory $env:CANDIDATE -PassThru
+            $p=Start-Process $launcherHost -ArgumentList '--ci-gui-self-test' -WorkingDirectory $env:CANDIDATE -PassThru
             if(-not $p.WaitForExit(60000)){
               try{$p.Kill($true)}catch{}
               throw "Visible-window repetition $i timed out"
