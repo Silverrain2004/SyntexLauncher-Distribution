@@ -30,7 +30,6 @@ var original = type.Methods.Single(m => m.Name == "InitializeAsync" && !m.HasPar
 if (type.Methods.Any(m => m.Name == "InitializeAsyncDeferredCore" || m.Name == "RunInitializeAsyncDeferred"))
     throw new InvalidOperationException("already patched");
 
-// Preserve the compiler-generated InitializeAsync wrapper exactly in a private clone.
 var clone = new MethodDefinition(
     "InitializeAsyncDeferredCore",
     Mono.Cecil.MethodAttributes.Private | Mono.Cecil.MethodAttributes.HideBySig,
@@ -82,7 +81,6 @@ foreach (var handler in original.Body.ExceptionHandlers)
     });
 }
 
-// Queue the real initialization as a parameterless callback.
 var deferred = new MethodDefinition(
     "RunInitializeAsyncDeferred",
     Mono.Cecil.MethodAttributes.Private | Mono.Cecil.MethodAttributes.HideBySig,
@@ -94,10 +92,9 @@ deferredIl.Append(deferredIl.Create(OpCodes.Call, clone));
 deferredIl.Append(deferredIl.Create(OpCodes.Pop));
 deferredIl.Append(deferredIl.Create(OpCodes.Ret));
 
-// Do NOT depend on SynchronizationContext.Current here. During Avalonia startup it can be null.
-// Always post onto Avalonia's UI dispatcher and, when the API exposes the priority parameter,
-// explicitly use DispatcherPriority.Background. This lets the MainWindow/layout/render work run
-// before potentially long initialization work, independent of whether persistent state already exists.
+// Always defer initialization until Avalonia has had a chance to perform layout/render.
+// Persistent launcher state can make InitializeAsync progress synchronously for longer than a
+// first-run path, so normal/default dispatcher priority is not strong enough as a render barrier.
 var directory = Path.GetDirectoryName(path) ?? throw new InvalidOperationException("assembly directory missing");
 var avaloniaBasePath = Path.Combine(directory, "Avalonia.Base.dll");
 if (!File.Exists(avaloniaBasePath))
@@ -145,4 +142,4 @@ var temporary = path + ".patched";
 asm.Write(temporary);
 File.Copy(temporary, path, true);
 File.Delete(temporary);
-Console.WriteLine($"PATCH_OK_AVALONIA_BACKGROUND:{Path.GetFileName(path)}:POST_PARAMS={post.Parameters.Count}");
+Console.WriteLine($"PATCH_OK_AVALONIA_DISPATCHER:{Path.GetFileName(path)}:POST_PARAMS={post.Parameters.Count}:PRIORITY=BACKGROUND");
