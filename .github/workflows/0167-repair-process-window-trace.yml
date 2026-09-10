@@ -1,0 +1,194 @@
+name: Syntex 0.16.7 Repair Process Window Trace
+
+on:
+  push:
+    branches: ['fix/0.16.7-setup-process-shutdown-v2']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  trace:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    env:
+      BASE_URL: https://github.com/Silverrain2004/SyntexLauncher-Distribution/releases/download/v0.16.6/SyntexLauncher-0.16.6-win-x64.zip
+      BASE_SHA: f34397dae9ca7986ef5d8f9183c6d4ee355126d2c9b913dea6eee561835ada74
+      BASE_SIZE: 69903997
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.400'
+
+      - name: Prepare immutable baseline
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $work=Join-Path $env:RUNNER_TEMP 'repair-window-trace'
+          $base=Join-Path $work 'base.zip'
+          $candidate=Join-Path $work 'candidate'
+          $root=Join-Path $work 'installed-root'
+          New-Item -ItemType Directory -Force $work,$candidate,$root|Out-Null
+          Invoke-WebRequest $env:BASE_URL -OutFile $base -UseBasicParsing
+          if((Get-Item $base).Length-ne[int64]$env:BASE_SIZE){throw '0.16.6 size changed'}
+          $sha=(Get-FileHash $base -Algorithm SHA256).Hash.ToLowerInvariant()
+          if($sha-ne$env:BASE_SHA){throw "0.16.6 hash changed: $sha"}
+          Expand-Archive $base $candidate -Force
+          Expand-Archive $base $root -Force
+          "WORK=$work"|Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          "CANDIDATE=$candidate"|Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          "ROOT=$root"|Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          Write-Host 'TRACE_IMMUTABLE_0166_PASS'
+
+      - name: Apply managed Background startup patch
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $patchDir=Join-Path $env:RUNNER_TEMP 'managed-startup-trace'
+          New-Item -ItemType Directory -Force $patchDir|Out-Null
+          Copy-Item .\rc-src\PatchManagedStartup.cs (Join-Path $patchDir 'Program.cs')
+          @'
+          <Project Sdk="Microsoft.NET.Sdk">
+            <PropertyGroup><OutputType>Exe</OutputType><TargetFramework>net10.0</TargetFramework><ImplicitUsings>enable</ImplicitUsings><Nullable>enable</Nullable></PropertyGroup>
+            <ItemGroup><PackageReference Include="Mono.Cecil" Version="0.11.6" /></ItemGroup>
+          </Project>
+          '@|Set-Content (Join-Path $patchDir 'Patcher.csproj') -Encoding utf8
+          $out=dotnet run --project (Join-Path $patchDir 'Patcher.csproj') -c Release -- (Join-Path $env:CANDIDATE 'app')
+          $out|Write-Host
+          if($LASTEXITCODE-ne0-or($out-join"`n")-notmatch'PRIORITY=BACKGROUND'){throw 'Managed Background patch failed'}
+
+      - name: Locate Visual C++ x64 toolchain
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $vswhere=Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+          $vs=&$vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if([string]::IsNullOrWhiteSpace($vs)){throw 'VC++ x64 tools missing'}
+          "VSDEVCMD=$(Join-Path $vs 'Common7\Tools\VsDevCmd.bat')"|Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Build candidate native host
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $cmd=Join-Path $env:RUNNER_TEMP 'trace-build-host.cmd'
+          @(
+            '@echo on',
+            "call `"$env:VSDEVCMD`" -arch=x64 -host_arch=x64",
+            'if errorlevel 1 exit /b %errorlevel%',
+            "cl.exe /nologo /DNOMINMAX /utf-8 /std:c++20 /EHsc /W4 /O1 /Os /GL /MT `"$env:GITHUB_WORKSPACE\rc-src\LauncherHost.cpp`" /Fe:`"$env:CANDIDATE\SyntexLauncher.exe`" /link /SUBSYSTEM:WINDOWS /MACHINE:X64 /LTCG /OPT:REF /OPT:ICF winhttp.lib bcrypt.lib shell32.lib user32.lib",
+            'exit /b %errorlevel%'
+          )|Set-Content $cmd -Encoding ascii
+          &cmd.exe /d /c $cmd
+          if($LASTEXITCODE-ne0){throw "Host build failed: $LASTEXITCODE"}
+
+      - name: Package candidate
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $zip=Join-Path $env:WORK 'candidate.zip'
+          Push-Location $env:CANDIDATE
+          try{&7z a -tzip -mx=1 -y $zip '.\*'|Out-Host}finally{Pop-Location}
+          if($LASTEXITCODE-ne0){throw "ZIP failed: $LASTEXITCODE"}
+          $sha=(Get-FileHash $zip -Algorithm SHA256).Hash.ToLowerInvariant()
+          $size=(Get-Item $zip).Length
+          "GOOD_ZIP=$zip"|Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          "GOOD_SHA=$sha"|Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          "GOOD_SIZE=$size"|Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          Write-Host "TRACE_PAYLOAD_SHA=$sha SIZE=$size"
+
+      - name: Patch and build diagnostic Setup
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          ./scripts/Patch-SetupProcessShutdown.ps1 -SetupSource ./rc-src/Setup.cpp
+          ./scripts/Patch-SetupGracefulShutdown.ps1 -SetupSource ./rc-src/Setup.cpp
+          @(
+            '#pragma once',
+            'static constexpr wchar_t PAYLOAD_URL[] = L"https://ci.invalid/trace.zip";',
+            ("static constexpr wchar_t PAYLOAD_SHA256[] = L`"{0}`";" -f $env:GOOD_SHA),
+            ("static constexpr unsigned long long PAYLOAD_SIZE = {0}ULL;" -f [int64]$env:GOOD_SIZE)
+          )|Set-Content ./rc-src/PayloadContract.h -Encoding utf8
+          $setup=Join-Path $env:WORK 'SyntexSetup-trace.exe'
+          $cmd=Join-Path $env:RUNNER_TEMP 'trace-build-setup.cmd'
+          @(
+            '@echo on',
+            "call `"$env:VSDEVCMD`" -arch=x64 -host_arch=x64",
+            'if errorlevel 1 exit /b %errorlevel%',
+            "cl.exe /nologo /DNOMINMAX /utf-8 /std:c++20 /EHsc /W4 /O2 /MT /I`"$env:GITHUB_WORKSPACE\rc-src`" `"$env:GITHUB_WORKSPACE\rc-src\Setup.cpp`" /Fe:`"$setup`" /link /SUBSYSTEM:WINDOWS /MACHINE:X64 winhttp.lib bcrypt.lib shell32.lib ole32.lib user32.lib gdi32.lib advapi32.lib comctl32.lib uxtheme.lib",
+            'exit /b %errorlevel%'
+          )|Set-Content $cmd -Encoding ascii
+          &cmd.exe /d /c $cmd
+          if($LASTEXITCODE-ne0){throw "Setup build failed: $LASTEXITCODE"}
+          "SETUP_EXE=$setup"|Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Trace repair process and window lifecycle
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          foreach($d in @('storage','data','instances','runtimes')){
+            New-Item -ItemType Directory -Force (Join-Path $env:ROOT $d)|Out-Null
+            "KEEP-$d"|Set-Content (Join-Path $env:ROOT "$d\keep.txt") -Encoding ascii
+          }
+
+          function Get-ExactRootRows {
+            $rootFull=[IO.Path]::GetFullPath($env:ROOT).TrimEnd('\')
+            $hostExe=(Join-Path $rootFull 'SyntexLauncher.exe')
+            $appPrefix=(Join-Path $rootFull 'app')+'\'
+            $rows=@()
+            foreach($p in Get-CimInstance Win32_Process -ErrorAction SilentlyContinue){
+              $path=$p.ExecutablePath
+              if([string]::IsNullOrWhiteSpace($path)){continue}
+              $full=[IO.Path]::GetFullPath($path)
+              if(($full -ieq $hostExe)-or$full.StartsWith($appPrefix,[StringComparison]::OrdinalIgnoreCase)){
+                $gp=Get-Process -Id $p.ProcessId -ErrorAction SilentlyContinue
+                $rows += [pscustomobject]@{
+                  PID=$p.ProcessId
+                  ParentPID=$p.ParentProcessId
+                  Path=$full
+                  CommandLine=$p.CommandLine
+                  MainWindowHandle=if($gp){$gp.MainWindowHandle}else{0}
+                  MainWindowTitle=if($gp){$gp.MainWindowTitle}else{''}
+                  Responding=if($gp){$gp.Responding}else{$false}
+                }
+              }
+            }
+            return $rows
+          }
+
+          $old=Start-Process (Join-Path $env:ROOT 'SyntexLauncher.exe') -WorkingDirectory $env:ROOT -PassThru
+          Start-Sleep -Seconds 3
+          Write-Host "TRACE_OLD_HOST_PID=$($old.Id)"
+          Get-ExactRootRows|Format-Table -AutoSize|Out-String|Write-Host
+
+          $setup=Start-Process $env:SETUP_EXE -ArgumentList @('--ci-install-local',"`"$env:ROOT`"","`"$env:GOOD_ZIP`"") -PassThru
+          $started=[DateTime]::UtcNow
+          $sample=0
+          while(-not $setup.HasExited-and([DateTime]::UtcNow-$started).TotalSeconds-lt175){
+            $sample++
+            Write-Host "=== TRACE SAMPLE $sample UTC=$([DateTime]::UtcNow.ToString('O')) SETUP_PID=$($setup.Id) ==="
+            $rows=Get-ExactRootRows
+            if($rows.Count-eq0){Write-Host 'NO_EXACT_ROOT_PROCESSES'}else{$rows|Format-Table -AutoSize|Out-String|Write-Host}
+            Start-Sleep -Seconds 2
+            $setup.Refresh()
+          }
+          if(-not $setup.HasExited){try{$setup.Kill($true)}catch{};"REPAIR_EXIT=999"|Out-File $env:GITHUB_ENV -Encoding utf8 -Append}else{"REPAIR_EXIT=$($setup.ExitCode)"|Out-File $env:GITHUB_ENV -Encoding utf8 -Append}
+
+          Write-Host '=== FINAL EXACT-ROOT PROCESS STATE ==='
+          Get-ExactRootRows|Format-Table -AutoSize|Out-String|Write-Host
+          Write-Host '=== STARTUP LOGS ==='
+          Get-ChildItem (Join-Path $env:ROOT 'storage\logs\launcher-startup') -File -ErrorAction SilentlyContinue|Sort-Object LastWriteTime|ForEach-Object{Write-Host "--- $($_.Name) ---";Get-Content $_.FullName -Raw|Write-Host}
+          Write-Host '=== MANAGED STARTUP LOGS ==='
+          Get-ChildItem (Join-Path $env:ROOT 'data\logs\launcher-startup') -File -ErrorAction SilentlyContinue|Sort-Object LastWriteTime|ForEach-Object{Write-Host "--- $($_.Name) ---";Get-Content $_.FullName -Raw|Write-Host}
+          Write-Host 'TRACE_CAPTURE_COMPLETE'
+
+      - name: Classify trace
+        shell: pwsh
+        run: |
+          if([int]$env:REPAIR_EXIT-ne0){throw "Repair trace reproduced failure with exit $env:REPAIR_EXIT"}
+          foreach($d in @('storage','data','instances','runtimes')){
+            if((Get-Content (Join-Path $env:ROOT "$d\keep.txt") -Raw).Trim()-ne"KEEP-$d"){throw "Repair changed $d"}
+          }
+          Write-Host 'TRACE_REPAIR_SUCCEEDED_WITH_USER_DATA_PASS'
