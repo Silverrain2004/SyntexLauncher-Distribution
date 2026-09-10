@@ -1,0 +1,75 @@
+name: Syntex 0.16.7 Running Upgrade State Isolation
+
+on:
+  push:
+    branches: ['fix/0.16.7-setup-process-healthcheck']
+    paths:
+      - '.github/workflows/0167-running-upgrade-state-isolation.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  isolate-running-upgrade:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    env:
+      GOOD_URL: https://github.com/Silverrain2004/SyntexLauncher-Distribution/releases/download/v0.16.7-ci-34467708548/SyntexLauncher-0.16.7-ci-win-x64.zip
+      GOOD_SHA: cc716db79bc5eb8cae80413aa2fe5cce519e05e3c2b12b9e11ae943c1780207f
+      GOOD_SIZE: 70090490
+      BASE_URL: https://github.com/Silverrain2004/SyntexLauncher-Distribution/releases/download/v0.16.6/SyntexLauncher-0.16.6-win-x64.zip
+      BASE_SHA: f34397dae9ca7986ef5d8f9183c6d4ee355126d2c9b913dea6eee561835ada74
+      BASE_SIZE: 69903997
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Prepare immutable payloads
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $work=Join-Path $env:RUNNER_TEMP 'running-upgrade-state'
+          New-Item -ItemType Directory -Force $work|Out-Null
+          function Get-Verified($url,$sha,$size,$name){$p=Join-Path $work $name;Invoke-WebRequest $url -OutFile $p -UseBasicParsing;if((Get-Item $p).Length -ne [int64]$size){throw "$name size"};if((Get-FileHash $p -Algorithm SHA256).Hash.ToLowerInvariant() -ne $sha){throw "$name hash"};$p}
+          $base=Get-Verified $env:BASE_URL $env:BASE_SHA $env:BASE_SIZE 'base.zip'
+          $good=Get-Verified $env:GOOD_URL $env:GOOD_SHA $env:GOOD_SIZE 'good.zip'
+          $root=Join-Path $work 'root';$goodRoot=Join-Path $work 'good'
+          Expand-Archive $base $root -Force;Expand-Archive $good $goodRoot -Force
+          "WORK=$work"|Out-File $env:GITHUB_ENV -Encoding utf8 -Append;"ROOT=$root"|Out-File $env:GITHUB_ENV -Encoding utf8 -Append;"GOOD_ROOT=$goodRoot"|Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Start 0.16.6 then stop all exact-root launcher processes
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $old=Start-Process (Join-Path $env:ROOT 'SyntexLauncher.exe') -WorkingDirectory $env:ROOT -PassThru
+          Start-Sleep -Seconds 3
+          if($old.HasExited){throw "old launcher exited too early: $($old.ExitCode)"}
+          Write-Host "OLD_HOST_PID=$($old.Id)"
+          $owned=Get-CimInstance Win32_Process|Where-Object{$_.ExecutablePath -and ($_.ExecutablePath.Equals((Join-Path $env:ROOT 'SyntexLauncher.exe'),[StringComparison]::OrdinalIgnoreCase) -or $_.ExecutablePath.StartsWith((Join-Path $env:ROOT 'app')+'\',[StringComparison]::OrdinalIgnoreCase))}
+          foreach($p in $owned){Write-Host "STOP PID=$($p.ProcessId) PATH=$($p.ExecutablePath)";Stop-Process -Id $p.ProcessId -Force -ErrorAction Stop}
+          Start-Sleep -Seconds 2
+          $left=Get-CimInstance Win32_Process|Where-Object{$_.ExecutablePath -and ($_.ExecutablePath.Equals((Join-Path $env:ROOT 'SyntexLauncher.exe'),[StringComparison]::OrdinalIgnoreCase) -or $_.ExecutablePath.StartsWith((Join-Path $env:ROOT 'app')+'\',[StringComparison]::OrdinalIgnoreCase))}
+          if($left){$left|ForEach-Object{Write-Host "LEFT PID=$($_.ProcessId) PATH=$($_.ExecutablePath)"};throw 'owned launcher process survived stop'}
+          Write-Host 'OLD_EXACT_ROOT_PROCESSES_STOPPED'
+
+      - name: Replace only managed program files and preserve user roots
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $preserved=@('storage','data','instances','runtimes','cache','downloads','logs','creator','diagnostics','temp','updates','fehleranalysen','saves','screenshots','resourcepacks','shaderpacks','config','profiles','accounts','backups')
+          foreach($item in Get-ChildItem $env:GOOD_ROOT -Force){if($preserved -contains $item.Name.ToLowerInvariant()){Write-Host "PRESERVE_SKIP=$($item.Name)";continue};$dest=Join-Path $env:ROOT $item.Name;if(Test-Path $dest){Remove-Item $dest -Recurse -Force};Copy-Item $item.FullName $dest -Recurse -Force}
+          Write-Host 'PROGRAM_FILES_REPLACED_USER_ROOTS_PRESERVED'
+
+      - name: Start 0.16.7 post-update healthcheck with retained state
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $exe=Join-Path $env:ROOT 'SyntexLauncher.exe'
+          $p=Start-Process $exe -ArgumentList '--post-update-health-check' -WorkingDirectory $env:ROOT -PassThru
+          if(-not $p.WaitForExit(130000)){try{$p.Kill($true)}catch{};throw 'healthcheck host did not return'}
+          Write-Host "RETAINED_STATE_HEALTHCHECK_EXIT=$($p.ExitCode)"
+          $logs=Join-Path $env:ROOT 'storage\logs\launcher-startup';if(Test-Path $logs){Get-ChildItem $logs -File|ForEach-Object{Write-Host "---$($_.Name)---";Get-Content $_.FullName -Raw|Write-Host}}
+          Get-Process SyntexLauncher -ErrorAction SilentlyContinue|Stop-Process -Force -ErrorAction SilentlyContinue
+          if($p.ExitCode -ne 0){throw "retained-state healthcheck failed $($p.ExitCode)"}
+          Write-Host 'RUNNING_UPGRADE_RETAINED_STATE_VISIBLE_WINDOW_PASS'
