@@ -24,6 +24,7 @@
 #pragma comment(lib, "shell32.lib")
 #pragma comment(lib, "ole32.lib")
 #pragma comment(lib, "user32.lib")
+#pragma comment(lib, "gdi32.lib")
 #pragma comment(lib, "advapi32.lib")
 #pragma comment(lib, "comctl32.lib")
 #pragma comment(lib, "uxtheme.lib")
@@ -427,7 +428,7 @@ static bool LaunchVerify(const fs::path& root, bool ciMode, std::wstring& error)
     const fs::path host = root / L"SyntexLauncher.exe";
     DWORD code = 0;
     const std::wstring command = Quote(host.wstring()) + (ciMode ? L" --ci-gui-self-test" : L"");
-    if (!RunProcess(command, root, code, error, 40000)) {
+    if (!RunProcess(command, root, code, error, 135000)) {
         error = L"Syntex Launcher konnte nicht innerhalb des Startprüfungsfensters bestätigt werden. " + error;
         return false;
     }
