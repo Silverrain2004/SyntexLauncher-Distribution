@@ -80,6 +80,8 @@ jobs:
           ) | Set-Content -LiteralPath $cmd -Encoding ascii
           & cmd.exe /d /c $cmd
           if ($LASTEXITCODE -ne 0) { throw "Old host build failed: $LASTEXITCODE" }
+          $oldHostHash = (Get-FileHash (Join-Path $env:OLD_ROOT 'SyntexLauncher.exe') -Algorithm SHA256).Hash.ToLowerInvariant()
+          "OLD_HOST_HASH=$oldHostHash" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
           New-Item -ItemType Directory -Force -Path (Join-Path $env:OLD_ROOT 'storage'),(Join-Path $env:OLD_ROOT 'instances'),(Join-Path $env:OLD_ROOT 'runtimes') | Out-Null
           'DO-NOT-DELETE' | Set-Content -LiteralPath (Join-Path $env:OLD_ROOT 'storage\user-data-preserved.txt') -Encoding ascii
           'WORLD-DATA' | Set-Content -LiteralPath (Join-Path $env:OLD_ROOT 'instances\world-preserved.txt') -Encoding ascii
@@ -89,6 +91,21 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
+          function Assert-PreservedData {
+            if ((Get-Content (Join-Path $env:OLD_ROOT 'storage\user-data-preserved.txt') -Raw).Trim() -ne 'DO-NOT-DELETE') { throw 'storage data was modified.' }
+            if ((Get-Content (Join-Path $env:OLD_ROOT 'instances\world-preserved.txt') -Raw).Trim() -ne 'WORLD-DATA') { throw 'instances data was modified.' }
+            if ((Get-Content (Join-Path $env:OLD_ROOT 'runtimes\runtime-preserved.txt') -Raw).Trim() -ne 'RUNTIME-DATA') { throw 'runtimes data was modified.' }
+          }
+          function Dump-SyntexLogs {
+            $logRoot = Join-Path $env:OLD_ROOT 'storage\logs'
+            if (Test-Path $logRoot) {
+              Get-ChildItem $logRoot -Recurse -File -ErrorAction SilentlyContinue | ForEach-Object {
+                Write-Host "--- $($_.FullName) ---"
+                Get-Content $_.FullName -Raw -ErrorAction SilentlyContinue
+              }
+            }
+          }
+
           $oldHost = Join-Path $env:OLD_ROOT 'SyntexLauncher.exe'
           $p = Start-Process $oldHost -PassThru
           if (-not $p.WaitForExit(180000)) {
@@ -110,6 +127,13 @@ jobs:
                 if ($text -match 'UPDATE_(BACKUP|INSTALL|HEALTHCHECK)_FAILED|UPDATE_ABORT') {
                   Write-Host "--- $($file.FullName) ---"
                   Write-Host $text
+                  Assert-PreservedData
+                  if ($text -match 'Rollback: erfolgreich') {
+                    $restoredHash = (Get-FileHash (Join-Path $env:OLD_ROOT 'SyntexLauncher.exe') -Algorithm SHA256).Hash.ToLowerInvariant()
+                    if ($restoredHash -ne $env:OLD_HOST_HASH) { throw "Rollback host mismatch: $restoredHash" }
+                    Write-Host 'REAL_UPDATE_ROLLBACK_AND_USER_DATA_PRESERVATION_PASS'
+                  }
+                  Dump-SyntexLogs
                   throw 'Update agent reported a transactional failure.'
                 }
               }
@@ -118,15 +142,13 @@ jobs:
           } while ([DateTime]::UtcNow -lt $deadline)
 
           if (-not $success) {
-            Get-ChildItem (Join-Path $env:OLD_ROOT 'storage\logs') -Recurse -File -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "--- $($_.FullName) ---"; Get-Content $_.FullName -Raw }
+            Dump-SyntexLogs
             throw 'Transactional self-update never reached UPDATE_SUCCESS.'
           }
 
           $installedHash = (Get-FileHash (Join-Path $env:OLD_ROOT 'SyntexLauncher.exe') -Algorithm SHA256).Hash.ToLowerInvariant()
           if ($installedHash -ne $env:CANDIDATE_HOST_HASH) { throw "Host replacement mismatch: $installedHash" }
-          if ((Get-Content (Join-Path $env:OLD_ROOT 'storage\user-data-preserved.txt') -Raw).Trim() -ne 'DO-NOT-DELETE') { throw 'storage data was modified.' }
-          if ((Get-Content (Join-Path $env:OLD_ROOT 'instances\world-preserved.txt') -Raw).Trim() -ne 'WORLD-DATA') { throw 'instances data was modified.' }
-          if ((Get-Content (Join-Path $env:OLD_ROOT 'runtimes\runtime-preserved.txt') -Raw).Trim() -ne 'RUNTIME-DATA') { throw 'runtimes data was modified.' }
+          Assert-PreservedData
           if (-not (Test-Path (Join-Path $env:OLD_ROOT 'app\SyntexUpdateAgent.exe'))) { throw 'Update agent was not installed.' }
           Get-Process SyntexLauncher -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
           Write-Host 'SELF_UPDATE_0166_TO_0167_PASS'
