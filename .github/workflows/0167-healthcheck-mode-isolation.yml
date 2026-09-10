@@ -1,0 +1,68 @@
+name: Syntex 0.16.7 Healthcheck Mode Isolation
+
+on:
+  push:
+    branches: ['fix/0.16.7-setup-process-healthcheck']
+    paths:
+      - '.github/workflows/0167-healthcheck-mode-isolation.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  isolate-healthcheck:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    env:
+      GOOD_URL: https://github.com/Silverrain2004/SyntexLauncher-Distribution/releases/download/v0.16.7-ci-34467708548/SyntexLauncher-0.16.7-ci-win-x64.zip
+      GOOD_SHA: cc716db79bc5eb8cae80413aa2fe5cce519e05e3c2b12b9e11ae943c1780207f
+      GOOD_SIZE: 70090490
+      BASE_URL: https://github.com/Silverrain2004/SyntexLauncher-Distribution/releases/download/v0.16.6/SyntexLauncher-0.16.6-win-x64.zip
+      BASE_SHA: f34397dae9ca7986ef5d8f9183c6d4ee355126d2c9b913dea6eee561835ada74
+      BASE_SIZE: 69903997
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Prepare immutable payloads
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $work=Join-Path $env:RUNNER_TEMP 'health-mode-isolation'
+          New-Item -ItemType Directory -Force $work|Out-Null
+          function Get-Verified($url,$sha,$size,$name){$p=Join-Path $work $name;Invoke-WebRequest $url -OutFile $p -UseBasicParsing;if((Get-Item $p).Length -ne [int64]$size){throw "$name size mismatch"};if((Get-FileHash $p -Algorithm SHA256).Hash.ToLowerInvariant() -ne $sha){throw "$name hash mismatch"};$p}
+          $base=Get-Verified $env:BASE_URL $env:BASE_SHA $env:BASE_SIZE 'base.zip'
+          $good=Get-Verified $env:GOOD_URL $env:GOOD_SHA $env:GOOD_SIZE 'good.zip'
+          $root=Join-Path $work 'good-root'
+          Expand-Archive $good $root -Force
+          "WORK=$work"|Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          "GOOD_ROOT=$root"|Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          "BASE_ZIP=$base"|Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Direct ci-gui healthcheck control
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $exe=Join-Path $env:GOOD_ROOT 'SyntexLauncher.exe'
+          $p=Start-Process $exe -ArgumentList '--ci-gui-self-test' -WorkingDirectory $env:GOOD_ROOT -PassThru
+          if(-not $p.WaitForExit(130000)){try{$p.Kill($true)}catch{};throw 'ci-gui host did not return'}
+          Write-Host "CI_GUI_EXIT=$($p.ExitCode)"
+          $dir=Join-Path $env:GOOD_ROOT 'storage\logs\launcher-startup';if(Test-Path $dir){Get-ChildItem $dir -File|ForEach-Object{Get-Content $_.FullName -Raw|Write-Host}}
+          if($p.ExitCode -ne 0){throw "ci-gui failed $($p.ExitCode)"}
+          Write-Host 'DIRECT_CI_GUI_HEALTHCHECK_PASS'
+
+      - name: Direct post-update healthcheck on fresh identical payload
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          Get-Process SyntexLauncher -ErrorAction SilentlyContinue|Stop-Process -Force -ErrorAction SilentlyContinue
+          $root=Join-Path $env:WORK 'post-root';Expand-Archive (Join-Path $env:WORK 'good.zip') $root -Force
+          $exe=Join-Path $root 'SyntexLauncher.exe'
+          $p=Start-Process $exe -ArgumentList '--post-update-health-check' -WorkingDirectory $root -PassThru
+          if(-not $p.WaitForExit(130000)){try{$p.Kill($true)}catch{};throw 'post-update host did not return'}
+          Write-Host "POST_UPDATE_EXIT=$($p.ExitCode)"
+          $dir=Join-Path $root 'storage\logs\launcher-startup';if(Test-Path $dir){Get-ChildItem $dir -File|ForEach-Object{Get-Content $_.FullName -Raw|Write-Host}}
+          Get-Process SyntexLauncher -ErrorAction SilentlyContinue|Stop-Process -Force -ErrorAction SilentlyContinue
+          if($p.ExitCode -ne 0){throw "post-update failed $($p.ExitCode)"}
+          Write-Host 'DIRECT_POST_UPDATE_HEALTHCHECK_PASS'
