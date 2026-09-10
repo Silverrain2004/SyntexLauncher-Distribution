@@ -43,10 +43,11 @@ jobs:
             return $p
           }
           $base=Get-Verified $env:BASE_URL $env:BASE_SHA $env:BASE_SIZE 'base.zip'
-          $null=Get-Verified $env:GOOD_URL $env:GOOD_SHA $env:GOOD_SIZE 'good.zip'
+          $good=Get-Verified $env:GOOD_URL $env:GOOD_SHA $env:GOOD_SIZE 'good.zip'
           "WORK=$work"|Out-File $env:GITHUB_ENV -Encoding utf8 -Append
           "DIST=$dist"|Out-File $env:GITHUB_ENV -Encoding utf8 -Append
           "BASE_ZIP=$base"|Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          "GOOD_ZIP=$good"|Out-File $env:GITHUB_ENV -Encoding utf8 -Append
 
       - name: Build x64 setup
         shell: pwsh
@@ -103,7 +104,7 @@ jobs:
         run: |
           $ErrorActionPreference='Stop'
           $root=$env:TEST_ROOT
-          $setup=Start-Process $env:FINAL_SETUP -ArgumentList @('--ci-install',"`"$root`"") -PassThru -Wait
+          $setup=Start-Process $env:FINAL_SETUP -ArgumentList @('--ci-install-local',"`"$root`"","`"$env:GOOD_ZIP`"") -PassThru -Wait
           if($setup.ExitCode-ne0){
             Get-ChildItem (Join-Path $root 'storage\logs') -Recurse -File -ErrorAction SilentlyContinue|ForEach-Object{Write-Host "--- $($_.FullName) ---";Get-Content $_.FullName -Raw|Write-Host}
             throw "setup exit $($setup.ExitCode)"
