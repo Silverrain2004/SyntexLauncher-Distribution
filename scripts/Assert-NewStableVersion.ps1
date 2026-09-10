@@ -34,3 +34,4 @@ if ($LASTEXITCODE -ne 1) {
 }
 
 Write-Host "IMMUTABLE_STABLE_AVAILABLE: $tag does not exist as a release or git tag."
+exit 0
