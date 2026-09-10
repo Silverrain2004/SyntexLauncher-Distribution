@@ -78,7 +78,10 @@ jobs:
               if (-not [SyntexSetupUi]::IsWindowVisible($hwnd)) { return $true }
               [uint32]$windowPid = 0
               [void][SyntexSetupUi]::GetWindowThreadProcessId($hwnd,[ref]$windowPid)
-              if ($windowPid -eq $ExpectedPid -and (Read-Class $hwnd) -eq 'SyntexLauncherNativeSetup') { $script:found = $hwnd; return $false }
+              if ($windowPid -eq $ExpectedPid -and [SyntexSetupUi]::GetDlgItem($hwnd,1001) -ne [IntPtr]::Zero -and [SyntexSetupUi]::GetDlgItem($hwnd,1003) -ne [IntPtr]::Zero) {
+                $script:found = $hwnd
+                return $false
+              }
               return $true
             }
             [void][SyntexSetupUi]::EnumWindows($cb,[IntPtr]::Zero)
@@ -92,7 +95,6 @@ jobs:
               [uint32]$windowPid = 0
               [void][SyntexSetupUi]::GetWindowThreadProcessId($hwnd,[ref]$windowPid)
               if ($windowPid -ne $ExpectedPid) { return $true }
-              $children = @()
               $childCb = [SyntexSetupUi+EnumChildProc]{
                 param([IntPtr]$child,[IntPtr]$unused2)
                 if ([SyntexSetupUi]::IsWindowVisible($child)) {
@@ -131,10 +133,12 @@ jobs:
               if ($p.HasExited) { throw "Published setup exited before GUI, code $($p.ExitCode)." }
               $window = Find-MainWindow ([uint32]$p.Id)
             }
-            if ($window -eq [IntPtr]::Zero) { throw 'Published setup GUI was not found.' }
+            if ($window -eq [IntPtr]::Zero) {
+              foreach ($w in @(Get-ProcessWindows ([uint32]$p.Id))) { Write-Host "UNMATCHED WINDOW class=$($w.class) title=[$($w.title)]" }
+              throw 'Published setup GUI with expected controls was not found.'
+            }
             $pathEdit = [SyntexSetupUi]::GetDlgItem($window,1001)
             $installButton = [SyntexSetupUi]::GetDlgItem($window,1003)
-            if ($pathEdit -eq [IntPtr]::Zero -or $installButton -eq [IntPtr]::Zero) { throw 'Published setup controls were not found.' }
             if (-not [SyntexSetupUi]::SetWindowText($pathEdit,$target)) { throw 'Could not set setup target.' }
             Write-Snapshot ([uint32]$p.Id) $window 'BEFORE_COMMAND'
             [void][SyntexSetupUi]::SendMessage($window,0x0111,[IntPtr]1003,$installButton)
