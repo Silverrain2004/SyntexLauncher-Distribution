@@ -2,7 +2,7 @@ name: Stable Release Immutability Smoke
 
 on:
   push:
-    branches: ['feat/0.16.7-self-update']
+    branches: ['feat/0.16.7-self-update', 'main']
     paths:
       - 'scripts/Assert-NewStableVersion.ps1'
       - '.github/workflows/stable-immutability-smoke.yml'
@@ -19,8 +19,6 @@ jobs:
       GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@v4
-        with:
-          ref: feat/0.16.7-self-update
 
       - name: Existing Stable 0.16.6 must be rejected
         shell: pwsh
