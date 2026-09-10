@@ -3,8 +3,12 @@ name: Syntex 0.16.7 Setup Final V3
 on:
   workflow_dispatch:
   push:
-    branches: ['feat/0.16.7-self-update']
+    branches: ['feat/0.16.7-self-update', 'main']
     paths:
+      - 'rc-src/Setup.cpp'
+      - 'rc-src/RepairTransaction.h'
+      - 'rc-src/LauncherHost.cpp'
+      - 'rc-src/UpdateAgent.cpp'
       - '.github/workflows/0167-setup-final-v3.yml'
 
 permissions:
@@ -27,8 +31,6 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
-        with:
-          ref: feat/0.16.7-self-update
 
       - name: Verify immutable inputs and prepare roots
         shell: pwsh
@@ -45,11 +47,11 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference='Stop'
-          $src=Join-Path $env:GITHUB_WORKSPACE 'rc-src\Setup.cpp'
+          $src=Join-Path $env:GITHUB_WORKSPACE 'rc-src\\Setup.cpp'
           $source=Get-Content $src -Raw
           if($source.Contains('fs::remove_all(target, ec);')){throw 'Current Setup source still deletes a successful CI install target.'}
-          $vswhere=Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe';$vs=&$vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath;if([string]::IsNullOrWhiteSpace($vs)){throw 'VC++ x64 missing'};$dev=Join-Path $vs 'Common7\Tools\VsDevCmd.bat'
-          function Build-Setup($url,$sha,$size,$out,$suffix){@('#pragma once',("static constexpr wchar_t PAYLOAD_URL[] = L`"{0}`";" -f $url),("static constexpr wchar_t PAYLOAD_SHA256[] = L`"{0}`";" -f $sha),("static constexpr unsigned long long PAYLOAD_SIZE = {0}ULL;" -f $size))|Set-Content .\rc-src\PayloadContract.h -Encoding utf8;$cmd=Join-Path $env:RUNNER_TEMP "build-setup-v3-$suffix.cmd";@('@echo on',"call `"$dev`" -arch=x64 -host_arch=x64",'if errorlevel 1 exit /b %errorlevel%',"cl.exe /nologo /DNOMINMAX /utf-8 /std:c++20 /EHsc /W4 /O2 /MT /I`"$env:GITHUB_WORKSPACE\rc-src`" `"$src`" /Fe:`"$out`" /link /SUBSYSTEM:WINDOWS /MACHINE:X64 winhttp.lib bcrypt.lib shell32.lib ole32.lib user32.lib gdi32.lib advapi32.lib comctl32.lib uxtheme.lib",'exit /b %errorlevel%')|Set-Content $cmd -Encoding ascii;&cmd.exe /d /c $cmd;if($LASTEXITCODE -ne 0){throw "Setup $suffix build failed"}}
+          $vswhere=Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\\Installer\\vswhere.exe';$vs=&$vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath;if([string]::IsNullOrWhiteSpace($vs)){throw 'VC++ x64 missing'};$dev=Join-Path $vs 'Common7\\Tools\\VsDevCmd.bat'
+          function Build-Setup($url,$sha,$size,$out,$suffix){@('#pragma once',("static constexpr wchar_t PAYLOAD_URL[] = L`"{0}`";" -f $url),("static constexpr wchar_t PAYLOAD_SHA256[] = L`"{0}`";" -f $sha),("static constexpr unsigned long long PAYLOAD_SIZE = {0}ULL;" -f $size))|Set-Content .\\rc-src\\PayloadContract.h -Encoding utf8;$cmd=Join-Path $env:RUNNER_TEMP "build-setup-v3-$suffix.cmd";@('@echo on',"call `"$dev`" -arch=x64 -host_arch=x64",'if errorlevel 1 exit /b %errorlevel%',"cl.exe /nologo /DNOMINMAX /utf-8 /std:c++20 /EHsc /W4 /O2 /MT /I`"$env:GITHUB_WORKSPACE\\rc-src`" `"$src`" /Fe:`"$out`" /link /SUBSYSTEM:WINDOWS /MACHINE:X64 winhttp.lib bcrypt.lib shell32.lib ole32.lib user32.lib gdi32.lib advapi32.lib comctl32.lib uxtheme.lib",'exit /b %errorlevel%')|Set-Content $cmd -Encoding ascii;&cmd.exe /d /c $cmd;if($LASTEXITCODE -ne 0){throw "Setup $suffix build failed"}}
           $good=Join-Path $env:DIST 'SyntexSetup-0.16.7-x64.exe';$bad=Join-Path $env:DIST 'SyntexSetup-0.16.7-x64-rollback-test.exe';Build-Setup $env:GOOD_URL $env:GOOD_SHA $env:GOOD_SIZE $good 'good';Build-Setup $env:BAD_URL $env:BAD_SHA $env:BAD_SIZE $bad 'bad'
           "FINAL_SETUP=$good"|Out-File $env:GITHUB_ENV -Encoding utf8 -Append;"BAD_SETUP=$bad"|Out-File $env:GITHUB_ENV -Encoding utf8 -Append
 
@@ -59,18 +61,18 @@ jobs:
           $ErrorActionPreference='Stop'
           foreach($arg in @('--self-test','--repair-self-test','--log-self-test')){$p=Start-Process $env:FINAL_SETUP -ArgumentList $arg -PassThru -Wait;if($p.ExitCode -ne 0){throw "$arg failed: $($p.ExitCode)"}}
           $log=Join-Path $env:DIST 'SyntexSetup-Log';if(-not(Test-Path $log) -or -not(Get-ChildItem $log -File)){throw 'SyntexSetup-Log next to setup missing.'}
-          $src=Get-Content .\rc-src\Setup.cpp -Raw;foreach($needle in @('PROGRESS_CLASSW','PBM_SETPOS','Durchsuchen…','Installationsordner')){if(-not $src.Contains($needle)){throw "UI contract missing: $needle"}}
+          $src=Get-Content .\\rc-src\\Setup.cpp -Raw;foreach($needle in @('PROGRESS_CLASSW','PBM_SETPOS','Durchsuchen…','Installationsordner')){if(-not $src.Contains($needle)){throw "UI contract missing: $needle"}}
           Write-Host 'SETUP_SELFTEST_PROGRESS_UNICODE_LOG_PASS'
 
       - name: Real successful repair visible start and user-data preservation
         shell: pwsh
         run: |
           $ErrorActionPreference='Stop'
-          $root=Join-Path $env:WORK 'good-root';Expand-Archive $env:BASE_ZIP $root -Force;foreach($d in @('storage','data','instances','runtimes')){New-Item -ItemType Directory -Force (Join-Path $root $d)|Out-Null;"KEEP-$d"|Set-Content (Join-Path $root "$d\keep.txt") -Encoding ascii}
+          $root=Join-Path $env:WORK 'good-root';Expand-Archive $env:BASE_ZIP $root -Force;foreach($d in @('storage','data','instances','runtimes')){New-Item -ItemType Directory -Force (Join-Path $root $d)|Out-Null;"KEEP-$d"|Set-Content (Join-Path $root "$d\\keep.txt") -Encoding ascii}
           $p=Start-Process $env:FINAL_SETUP -ArgumentList @('--ci-install',"`"$root`"") -PassThru -Wait
-          if($p.ExitCode -ne 0){$logs=Join-Path $env:DIST 'SyntexSetup-Log';if(Test-Path $logs){Get-ChildItem $logs -File|ForEach-Object{Write-Host "--- $($_.FullName) ---";Get-Content $_.FullName -Raw}};$startup=Join-Path $root 'storage\logs\launcher-startup';if(Test-Path $startup){Get-ChildItem $startup -File|ForEach-Object{Write-Host "--- $($_.FullName) ---";Get-Content $_.FullName -Raw}};throw "Good Setup exit $($p.ExitCode)"}
+          if($p.ExitCode -ne 0){$logs=Join-Path $env:DIST 'SyntexSetup-Log';if(Test-Path $logs){Get-ChildItem $logs -File|ForEach-Object{Write-Host "--- $($_.FullName) ---";Get-Content $_.FullName -Raw}};$startup=Join-Path $root 'storage\\logs\\launcher-startup';if(Test-Path $startup){Get-ChildItem $startup -File|ForEach-Object{Write-Host "--- $($_.FullName) ---";Get-Content $_.FullName -Raw}};throw "Good Setup exit $($p.ExitCode)"}
           if((Get-FileHash (Join-Path $root 'SyntexLauncher.exe') -Algorithm SHA256).Hash.ToLowerInvariant() -ne $env:GOOD_HOST_HASH){throw 'Good Setup host mismatch'}
-          foreach($d in @('storage','data','instances','runtimes')){if((Get-Content (Join-Path $root "$d\keep.txt") -Raw).Trim() -ne "KEEP-$d"){throw "Good Setup changed $d"}}
+          foreach($d in @('storage','data','instances','runtimes')){if((Get-Content (Join-Path $root "$d\\keep.txt") -Raw).Trim() -ne "KEEP-$d"){throw "Good Setup changed $d"}}
           Get-Process SyntexLauncher -ErrorAction SilentlyContinue|Stop-Process -Force -ErrorAction SilentlyContinue
           Write-Host 'SETUP_REAL_REPAIR_VISIBLE_START_ALL_USER_DATA_PASS'
 
@@ -78,10 +80,10 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference='Stop'
-          $root=Join-Path $env:WORK 'bad-root';Expand-Archive $env:BASE_ZIP $root -Force;foreach($d in @('storage','data','instances','runtimes')){New-Item -ItemType Directory -Force (Join-Path $root $d)|Out-Null;"KEEP-$d"|Set-Content (Join-Path $root "$d\keep.txt") -Encoding ascii};$old=(Get-FileHash (Join-Path $root 'SyntexLauncher.exe') -Algorithm SHA256).Hash
+          $root=Join-Path $env:WORK 'bad-root';Expand-Archive $env:BASE_ZIP $root -Force;foreach($d in @('storage','data','instances','runtimes')){New-Item -ItemType Directory -Force (Join-Path $root $d)|Out-Null;"KEEP-$d"|Set-Content (Join-Path $root "$d\\keep.txt") -Encoding ascii};$old=(Get-FileHash (Join-Path $root 'SyntexLauncher.exe') -Algorithm SHA256).Hash
           $p=Start-Process $env:BAD_SETUP -ArgumentList @('--ci-install',"`"$root`"") -PassThru -Wait;if($p.ExitCode -eq 0){throw 'Bad Setup unexpectedly succeeded'}
           if((Get-FileHash (Join-Path $root 'SyntexLauncher.exe') -Algorithm SHA256).Hash -ne $old){throw 'Rollback host mismatch'}
-          foreach($d in @('storage','data','instances','runtimes')){if((Get-Content (Join-Path $root "$d\keep.txt") -Raw).Trim() -ne "KEEP-$d"){throw "Rollback changed $d"}}
+          foreach($d in @('storage','data','instances','runtimes')){if((Get-Content (Join-Path $root "$d\\keep.txt") -Raw).Trim() -ne "KEEP-$d"){throw "Rollback changed $d"}}
           Write-Host 'SETUP_REAL_AUTOMATIC_ROLLBACK_ALL_USER_DATA_PASS'
 
       - name: Upload verified final x64 setup

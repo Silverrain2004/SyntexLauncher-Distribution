@@ -5,6 +5,11 @@ on:
     paths:
       - 'distribution.json'
       - '.github/workflows/distribution-smoke.yml'
+  pull_request:
+    branches: ['main']
+    paths:
+      - 'distribution.json'
+      - '.github/workflows/distribution-smoke.yml'
   workflow_dispatch:
 
 permissions:
