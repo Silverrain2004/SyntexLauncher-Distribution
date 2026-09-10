@@ -7,8 +7,8 @@
   "minimumWindowsBuild": 17763,
   "payload": {
     "url": "https://github.com/Silverrain2004/SyntexLauncher-Distribution/releases/download/v0.16.6/SyntexLauncher-0.16.6-win-x64.zip",
-    "sha256": "78870eca0ce18e16010b014d1e5f4a7c7a5a6d633bb94a62327fb3e23db7c743",
-    "size": 69903914
+    "sha256": "f34397dae9ca7986ef5d8f9183c6d4ee355126d2c9b913dea6eee561835ada74",
+    "size": 69903997
   },
   "languages": {
     "base": [
@@ -17,5 +17,5 @@
     ],
     "remote": []
   },
-  "publishedUtc": "2026-09-09T18:06:23Z"
+  "publishedUtc": "2026-09-09T22:13:35Z"
 }
