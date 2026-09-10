@@ -1,0 +1,148 @@
+name: Verify Syntex 0.16.7 Post-Publish
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/verify-stable-0167-post-publish.yml'
+  workflow_run:
+    workflows: ['Publish Syntex 0.16.7 Stable']
+    types: [completed]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate-workflow-on-pr:
+    name: validate-post-publish-contract
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate immutable expected contract
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $text = Get-Content '${{ github.workspace }}/.github/workflows/verify-stable-0167-post-publish.yml' -Raw
+          foreach ($needle in @(
+            'cc716db79bc5eb8cae80413aa2fe5cce519e05e3c2b12b9e11ae943c1780207f',
+            '3b2bd876de661a8ee73745ede4f1a4ceccb8b4199f88080d62098878fc8b8000',
+            'f34397dae9ca7986ef5d8f9183c6d4ee355126d2c9b913dea6eee561835ada74',
+            '7d785b1b4205ccb9bc59ab630bebd93a9853ba8f4bbf491f8315091e12241c17')) {
+            if (-not $text.Contains($needle)) { throw "Expected immutable hash missing from verifier: $needle" }
+          }
+          Write-Host 'POST_PUBLISH_VERIFIER_CONTRACT_PASS'
+
+  verify-stable:
+    name: verify-published-0.16.7-end-to-end
+    if: github.event_name != 'pull_request' && (github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success')
+    runs-on: windows-latest
+    env:
+      REPO: Silverrain2004/SyntexLauncher-Distribution
+      NEW_TAG: v0.16.7
+      NEW_PAYLOAD: SyntexLauncher-0.16.7-win-x64.zip
+      NEW_PAYLOAD_SHA256: cc716db79bc5eb8cae80413aa2fe5cce519e05e3c2b12b9e11ae943c1780207f
+      NEW_PAYLOAD_SIZE: '70090490'
+      NEW_PAYLOAD_URL: https://github.com/Silverrain2004/SyntexLauncher-Distribution/releases/download/v0.16.7/SyntexLauncher-0.16.7-win-x64.zip
+      NEW_SETUP: SyntexSetup-0.16.7-x64.exe
+      NEW_SETUP_SHA256: 3b2bd876de661a8ee73745ede4f1a4ceccb8b4199f88080d62098878fc8b8000
+      NEW_SETUP_SIZE: '394752'
+      NEW_SETUP_URL: https://github.com/Silverrain2004/SyntexLauncher-Distribution/releases/download/v0.16.7/SyntexSetup-0.16.7-x64.exe
+      OLD_TAG: v0.16.6
+      OLD_PAYLOAD: SyntexLauncher-0.16.6-win-x64.zip
+      OLD_PAYLOAD_SHA256: f34397dae9ca7986ef5d8f9183c6d4ee355126d2c9b913dea6eee561835ada74
+      OLD_PAYLOAD_SIZE: '69903997'
+      OLD_SETUP: SyntexLauncherSetup-0.16.6-win-x64.exe
+      OLD_SETUP_SHA256: 7d785b1b4205ccb9bc59ab630bebd93a9853ba8f4bbf491f8315091e12241c17
+      OLD_SETUP_SIZE: '331776'
+    steps:
+      - name: Check whether stable 0.16.7 exists
+        id: release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          gh release view $env:NEW_TAG --repo $env:REPO --json tagName,isDraft,isPrerelease | Out-Null
+          if ($LASTEXITCODE -ne 0) {
+            if ('${{ github.event_name }}' -eq 'workflow_dispatch') { throw 'Manual verification requires published v0.16.7.' }
+            'exists=false' | Out-File $env:GITHUB_OUTPUT -Encoding utf8 -Append
+            Write-Host 'NO_STABLE_0_16_7_RELEASE_SKIP'
+            exit 0
+          }
+          'exists=true' | Out-File $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          Write-Host 'STABLE_0_16_7_RELEASE_FOUND'
+
+      - name: Verify release metadata and exact asset names
+        if: steps.release.outputs.exists == 'true'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $release = gh release view $env:NEW_TAG --repo $env:REPO --json tagName,isDraft,isPrerelease,assets | ConvertFrom-Json
+          if ($release.tagName -cne $env:NEW_TAG) { throw 'Unexpected stable tag.' }
+          if ($release.isDraft -or $release.isPrerelease) { throw 'v0.16.7 must be a non-draft, non-prerelease stable release.' }
+          $names = @($release.assets | ForEach-Object { $_.name })
+          foreach ($required in @($env:NEW_PAYLOAD,$env:NEW_SETUP)) {
+            if ($names -notcontains $required) { throw "Required stable asset missing: $required" }
+          }
+          if (($names | Where-Object { $_ -in @($env:NEW_PAYLOAD,$env:NEW_SETUP) }).Count -ne 2) { throw 'Stable asset contract is ambiguous.' }
+          Write-Host 'STABLE_0_16_7_RELEASE_METADATA_PASS'
+
+      - name: Download and hash stable 0.16.7 assets
+        if: steps.release.outputs.exists == 'true'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $dir = Join-Path $env:RUNNER_TEMP 'stable-0167-final-smoke'
+          New-Item -ItemType Directory -Force $dir | Out-Null
+          $payload = Join-Path $dir $env:NEW_PAYLOAD
+          $setup = Join-Path $dir $env:NEW_SETUP
+          Invoke-WebRequest $env:NEW_PAYLOAD_URL -OutFile $payload -UseBasicParsing
+          Invoke-WebRequest $env:NEW_SETUP_URL -OutFile $setup -UseBasicParsing
+          if ((Get-Item $payload).Length -ne [int64]$env:NEW_PAYLOAD_SIZE) { throw 'Stable 0.16.7 payload size mismatch.' }
+          if ((Get-FileHash $payload -Algorithm SHA256).Hash.ToLowerInvariant() -cne $env:NEW_PAYLOAD_SHA256) { throw 'Stable 0.16.7 payload SHA-256 mismatch.' }
+          if ((Get-Item $setup).Length -ne [int64]$env:NEW_SETUP_SIZE) { throw 'Stable 0.16.7 Setup size mismatch.' }
+          if ((Get-FileHash $setup -Algorithm SHA256).Hash.ToLowerInvariant() -cne $env:NEW_SETUP_SHA256) { throw 'Stable 0.16.7 Setup SHA-256 mismatch.' }
+          $bytes = [IO.File]::ReadAllBytes($setup)
+          if ($bytes.Length -lt 64 -or $bytes[0] -ne 0x4d -or $bytes[1] -ne 0x5a) { throw 'Stable Setup is not a PE executable.' }
+          $peOffset = [BitConverter]::ToInt32($bytes, 0x3c)
+          if ($peOffset -lt 0 -or $peOffset + 6 -gt $bytes.Length) { throw 'Stable Setup PE header is invalid.' }
+          $machine = [BitConverter]::ToUInt16($bytes, $peOffset + 4)
+          if ($machine -ne 0x8664) { throw "Stable Setup is not AMD64 PE (machine=0x$($machine.ToString('x4')))." }
+          Write-Host 'STABLE_0_16_7_ASSET_HASH_SIZE_AMD64_PASS'
+
+      - name: Verify promoted main manifest
+        if: steps.release.outputs.exists == 'true'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $uri = 'https://raw.githubusercontent.com/Silverrain2004/SyntexLauncher-Distribution/main/distribution.json'
+          $manifest = Invoke-RestMethod $uri -UseBasicParsing
+          if ([string]$manifest.version -cne '0.16.7') { throw "Main distribution manifest was not promoted to 0.16.7: $($manifest.version)" }
+          if ([string]$manifest.channel -cne 'stable') { throw 'Distribution channel is not stable.' }
+          if ([string]$manifest.runtimeIdentifier -cne 'win-x64') { throw 'Distribution runtimeIdentifier is not win-x64.' }
+          if ([string]$manifest.payload.url -cne $env:NEW_PAYLOAD_URL) { throw 'Distribution payload URL does not point to immutable v0.16.7 asset.' }
+          if ([string]$manifest.payload.sha256 -cne $env:NEW_PAYLOAD_SHA256) { throw 'Distribution payload hash mismatch.' }
+          if ([int64]$manifest.payload.size -ne [int64]$env:NEW_PAYLOAD_SIZE) { throw 'Distribution payload size mismatch.' }
+          Write-Host 'STABLE_0_16_7_MAIN_MANIFEST_PASS'
+
+      - name: Re-verify immutable 0.16.6 baseline assets
+        if: steps.release.outputs.exists == 'true'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $dir = Join-Path $env:RUNNER_TEMP 'stable-0166-immutability-smoke'
+          New-Item -ItemType Directory -Force $dir | Out-Null
+          $payload = Join-Path $dir $env:OLD_PAYLOAD
+          $setup = Join-Path $dir $env:OLD_SETUP
+          Invoke-WebRequest "https://github.com/$($env:REPO)/releases/download/$($env:OLD_TAG)/$($env:OLD_PAYLOAD)" -OutFile $payload -UseBasicParsing
+          Invoke-WebRequest "https://github.com/$($env:REPO)/releases/download/$($env:OLD_TAG)/$($env:OLD_SETUP)" -OutFile $setup -UseBasicParsing
+          if ((Get-Item $payload).Length -ne [int64]$env:OLD_PAYLOAD_SIZE) { throw 'Immutable 0.16.6 payload size changed.' }
+          if ((Get-FileHash $payload -Algorithm SHA256).Hash.ToLowerInvariant() -cne $env:OLD_PAYLOAD_SHA256) { throw 'Immutable 0.16.6 payload hash changed.' }
+          if ((Get-Item $setup).Length -ne [int64]$env:OLD_SETUP_SIZE) { throw 'Immutable 0.16.6 Setup size changed.' }
+          if ((Get-FileHash $setup -Algorithm SHA256).Hash.ToLowerInvariant() -cne $env:OLD_SETUP_SHA256) { throw 'Immutable 0.16.6 Setup hash changed.' }
+          Write-Host 'STABLE_0_16_6_IMMUTABILITY_RECHECK_PASS'
+          Write-Host 'STABLE_0_16_7_END_TO_END_POST_PUBLISH_PASS'
