@@ -48,30 +48,11 @@ static std::vector<DWORD> OwnedLauncherProcessIds(const fs::path& root) {
     return result;
 }
 
-static void RequestCloseForPid(DWORD pid) {
-    struct Context { DWORD pid; } context{pid};
-    EnumWindows([](HWND hwnd, LPARAM value) -> BOOL {
-        auto* context = reinterpret_cast<Context*>(value);
-        DWORD windowPid = 0;
-        GetWindowThreadProcessId(hwnd, &windowPid);
-        if (windowPid == context->pid) PostMessageW(hwnd, WM_CLOSE, 0, 0);
-        return TRUE;
-    }, reinterpret_cast<LPARAM>(&context));
-}
-
 static bool StopLauncherProgramProcesses(const fs::path& root, std::wstring& error) noexcept {
     try {
-        auto pids = OwnedLauncherProcessIds(root);
-        if (pids.empty()) return true;
-        for (const DWORD pid : pids) RequestCloseForPid(pid);
-        const ULONGLONG gracefulDeadline = GetTickCount64() + 5000;
-        while (GetTickCount64() < gracefulDeadline) {
-            if (OwnedLauncherProcessIds(root).empty()) return true;
-            Sleep(100);
-        }
-        const ULONGLONG hardDeadline = GetTickCount64() + 10000;
-        while (GetTickCount64() < hardDeadline) {
-            pids = OwnedLauncherProcessIds(root);
+        const ULONGLONG deadline = GetTickCount64() + 10000;
+        while (GetTickCount64() < deadline) {
+            const auto pids = OwnedLauncherProcessIds(root);
             if (pids.empty()) return true;
             for (const DWORD pid : pids) {
                 HANDLE process = OpenProcess(PROCESS_TERMINATE | SYNCHRONIZE, FALSE, pid);
@@ -113,4 +94,4 @@ $s=$s.Replace('Syntex Launcher Setup 0.16.6','Syntex Launcher Setup 0.16.7')
 $s=$s.Replace('SyntexLauncherSetup/0.16.6-RC1','SyntexLauncherSetup/0.16.7')
 $s=$s.Replace('DisplayVersion", L"0.16.6"','DisplayVersion", L"0.16.7"')
 Set-Content $SetupSource $s -Encoding utf8
-Write-Host 'SETUP_DETERMINISTIC_PROCESS_DRAIN_BEFORE_TRANSACTION_PATCH_PASS'
+Write-Host 'SETUP_FORCE_PROCESS_DRAIN_BEFORE_TRANSACTION_PATCH_PASS'
