@@ -50,8 +50,9 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           $ErrorActionPreference = 'Stop'
-          $output = & ./scripts/Assert-NewStableVersion.ps1 -Repository '${{ github.repository }}' -Version '0.16.6' 2>&1 | Out-String
-          if ($LASTEXITCODE -eq 0) { throw 'Existing v0.16.6 was not rejected.' }
+          $output = & pwsh -NoProfile -File ./scripts/Assert-NewStableVersion.ps1 -Repository '${{ github.repository }}' -Version '0.16.6' 2>&1 | Out-String
+          $code = $LASTEXITCODE
+          if ($code -eq 0) { throw 'Existing v0.16.6 was not rejected.' }
           if (-not $output.Contains('IMMUTABLE_STABLE_REJECTED')) { throw "Expected immutable rejection marker missing: $output" }
           Write-Host 'EXISTING_STABLE_REJECTION_PASS'
 
@@ -71,7 +72,7 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           $text = Get-Content '${{ github.workspace }}/.github/workflows/publish-stable-0167.yml' -Raw
-          $forbidden = @('--clobber','release delete','tag -f','push --force','push -f','release upload','deleteRelease','delete_ref')
+          $forbidden = @('--'+'clobber','release '+'delete','tag '+'-f','push '+'--force','push '+'-f','release '+'upload','delete'+'Release','delete'+'_ref')
           foreach ($needle in $forbidden) {
             if ($text.IndexOf($needle, [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
               throw "Forbidden destructive publish primitive present: $needle"
