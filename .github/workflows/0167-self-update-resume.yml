@@ -1,0 +1,131 @@
+name: Syntex 0.16.7 Self-Update Resume
+
+on:
+  push:
+    branches: ['feat/0.16.7-self-update']
+    paths:
+      - '.github/workflows/0167-self-update-resume.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows-e2e:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/0.16.7-self-update
+
+      - name: Verify isolated 0.16.7 manifest and payload
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $manifestUri = 'https://raw.githubusercontent.com/Silverrain2004/SyntexLauncher-Distribution/feat/0.16.7-self-update/self-update-test.json'
+          $manifest = Invoke-RestMethod -Uri $manifestUri -UseBasicParsing
+          if ($manifest.version -ne '0.16.7') { throw "Unexpected test version: $($manifest.version)" }
+          if (-not $manifest.payload.url.StartsWith('https://', [StringComparison]::OrdinalIgnoreCase)) { throw 'Payload URL is not HTTPS.' }
+          $work = Join-Path $env:RUNNER_TEMP 'syntex-0167-resume'
+          $oldRoot = Join-Path $work 'old-root'
+          $candidate = Join-Path $work 'candidate'
+          New-Item -ItemType Directory -Force -Path $work,$oldRoot,$candidate | Out-Null
+          $candidateZip = Join-Path $work 'candidate.zip'
+          Invoke-WebRequest -Uri $manifest.payload.url -OutFile $candidateZip -UseBasicParsing
+          $size = (Get-Item $candidateZip).Length
+          if ($size -ne [long]$manifest.payload.size) { throw "Candidate size mismatch: expected $($manifest.payload.size), got $size" }
+          $hash = (Get-FileHash $candidateZip -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($hash -ne ([string]$manifest.payload.sha256).ToLowerInvariant()) { throw "Candidate SHA-256 mismatch: $hash" }
+          Expand-Archive -LiteralPath $candidateZip -DestinationPath $candidate -Force
+          $candidateHostHash = (Get-FileHash (Join-Path $candidate 'SyntexLauncher.exe') -Algorithm SHA256).Hash.ToLowerInvariant()
+
+          $baseZip = Join-Path $work 'base-0.16.6.zip'
+          Invoke-WebRequest -Uri 'https://github.com/Silverrain2004/SyntexLauncher-Distribution/releases/download/v0.16.6/SyntexLauncher-0.16.6-win-x64.zip' -OutFile $baseZip -UseBasicParsing
+          if ((Get-Item $baseZip).Length -ne 69903997) { throw 'Published 0.16.6 base size changed.' }
+          $baseHash = (Get-FileHash $baseZip -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($baseHash -ne 'f34397dae9ca7986ef5d8f9183c6d4ee355126d2c9b913dea6eee561835ada74') { throw "Published 0.16.6 base hash changed: $baseHash" }
+          Expand-Archive -LiteralPath $baseZip -DestinationPath $oldRoot -Force
+
+          "WORK=$work" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          "OLD_ROOT=$oldRoot" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          "CANDIDATE_HOST_HASH=$candidateHostHash" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Locate Visual C++ x64 toolchain
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+          $vs = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if ([string]::IsNullOrWhiteSpace($vs)) { throw 'Visual C++ x64 tools not found.' }
+          "VSDEVCMD=$(Join-Path $vs 'Common7\Tools\VsDevCmd.bat')" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Build simulated 0.16.6 update host
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $source = Get-Content "$env:GITHUB_WORKSPACE\rc-src\LauncherHost.cpp" -Raw
+          $source = $source.Replace('static constexpr wchar_t kCurrentVersion[] = L"0.16.7";', 'static constexpr wchar_t kCurrentVersion[] = L"0.16.6";')
+          $source = $source.Replace('https://raw.githubusercontent.com/Silverrain2004/SyntexLauncher-Distribution/main/distribution.json', 'https://raw.githubusercontent.com/Silverrain2004/SyntexLauncher-Distribution/feat/0.16.7-self-update/self-update-test.json')
+          $oldSource = Join-Path $env:RUNNER_TEMP 'LauncherHost-0.16.6-test.cpp'
+          Set-Content -LiteralPath $oldSource -Value $source -Encoding utf8
+          $cmd = Join-Path $env:RUNNER_TEMP 'build-old-test-host.cmd'
+          @(
+            '@echo on',
+            "call `"$env:VSDEVCMD`" -arch=x64 -host_arch=x64",
+            'if errorlevel 1 exit /b %errorlevel%',
+            "cl.exe /nologo /DNOMINMAX /utf-8 /std:c++20 /EHsc /W4 /O1 /Os /GL /MT `"$oldSource`" /Fe:`"$env:OLD_ROOT\SyntexLauncher.exe`" /link /SUBSYSTEM:WINDOWS /MACHINE:X64 /LTCG /OPT:REF /OPT:ICF winhttp.lib bcrypt.lib shell32.lib user32.lib",
+            'exit /b %errorlevel%'
+          ) | Set-Content -LiteralPath $cmd -Encoding ascii
+          & cmd.exe /d /c $cmd
+          if ($LASTEXITCODE -ne 0) { throw "Old host build failed: $LASTEXITCODE" }
+          New-Item -ItemType Directory -Force -Path (Join-Path $env:OLD_ROOT 'storage'),(Join-Path $env:OLD_ROOT 'instances'),(Join-Path $env:OLD_ROOT 'runtimes') | Out-Null
+          'DO-NOT-DELETE' | Set-Content -LiteralPath (Join-Path $env:OLD_ROOT 'storage\user-data-preserved.txt') -Encoding ascii
+          'WORLD-DATA' | Set-Content -LiteralPath (Join-Path $env:OLD_ROOT 'instances\world-preserved.txt') -Encoding ascii
+          'RUNTIME-DATA' | Set-Content -LiteralPath (Join-Path $env:OLD_ROOT 'runtimes\runtime-preserved.txt') -Encoding ascii
+
+      - name: End-to-end self-update 0.16.6 to 0.16.7
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $oldHost = Join-Path $env:OLD_ROOT 'SyntexLauncher.exe'
+          $p = Start-Process $oldHost -PassThru
+          if (-not $p.WaitForExit(180000)) {
+            try { $p.Kill($true) } catch {}
+            throw 'Old host did not hand update to the update agent within 180 seconds.'
+          }
+          if ($p.ExitCode -ne 0) { throw "Old host did not hand update to agent: $($p.ExitCode)" }
+
+          $deadline = [DateTime]::UtcNow.AddMinutes(3)
+          $success = $false
+          do {
+            Start-Sleep -Milliseconds 500
+            $logs = Join-Path $env:OLD_ROOT 'storage\logs\launcher-update'
+            if (Test-Path $logs) {
+              $files = Get-ChildItem $logs -File -ErrorAction SilentlyContinue
+              foreach ($file in $files) {
+                $text = Get-Content $file.FullName -Raw -ErrorAction SilentlyContinue
+                if ($text -match 'UPDATE_SUCCESS') { $success = $true; break }
+                if ($text -match 'UPDATE_(BACKUP|INSTALL|HEALTHCHECK)_FAILED|UPDATE_ABORT') {
+                  Write-Host "--- $($file.FullName) ---"
+                  Write-Host $text
+                  throw 'Update agent reported a transactional failure.'
+                }
+              }
+            }
+            if ($success) { break }
+          } while ([DateTime]::UtcNow -lt $deadline)
+
+          if (-not $success) {
+            Get-ChildItem (Join-Path $env:OLD_ROOT 'storage\logs') -Recurse -File -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "--- $($_.FullName) ---"; Get-Content $_.FullName -Raw }
+            throw 'Transactional self-update never reached UPDATE_SUCCESS.'
+          }
+
+          $installedHash = (Get-FileHash (Join-Path $env:OLD_ROOT 'SyntexLauncher.exe') -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($installedHash -ne $env:CANDIDATE_HOST_HASH) { throw "Host replacement mismatch: $installedHash" }
+          if ((Get-Content (Join-Path $env:OLD_ROOT 'storage\user-data-preserved.txt') -Raw).Trim() -ne 'DO-NOT-DELETE') { throw 'storage data was modified.' }
+          if ((Get-Content (Join-Path $env:OLD_ROOT 'instances\world-preserved.txt') -Raw).Trim() -ne 'WORLD-DATA') { throw 'instances data was modified.' }
+          if ((Get-Content (Join-Path $env:OLD_ROOT 'runtimes\runtime-preserved.txt') -Raw).Trim() -ne 'RUNTIME-DATA') { throw 'runtimes data was modified.' }
+          if (-not (Test-Path (Join-Path $env:OLD_ROOT 'app\SyntexUpdateAgent.exe'))) { throw 'Update agent was not installed.' }
+          Get-Process SyntexLauncher -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+          Write-Host 'SELF_UPDATE_0166_TO_0167_PASS'
