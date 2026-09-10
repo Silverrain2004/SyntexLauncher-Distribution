@@ -88,9 +88,16 @@ $s=$s.Replace($old,'const std::wstring command = Quote(host.wstring()) + L" --po
 $old2='if (!ValidateWritableRoot(root, error)) { cleanup(); return false; }'
 if(-not $s.Contains($old2)){throw 'Writable root anchor missing'}
 $s=$s.Replace($old2,$old2+"`r`n`r`n    progress(6, L`"Laufender Syntex Launcher wird für Installation/Aktualisierung beendet …`" );`r`n    if (!StopLauncherProgramProcesses(root, error)) { cleanup(); return false; }")
+$downloadLoop='    unsigned long long total = 0;`r`n    DWORD available = 0;`r`n    while (WinHttpQueryDataAvailable(request, &available) && available > 0) {'
+if(-not $s.Contains($downloadLoop)){throw 'Download loop anchor missing'}
+$downloadReplacement='    unsigned long long total = 0;`r`n    DWORD available = 0;`r`n    const ULONGLONG downloadDeadline = GetTickCount64() + 300000ULL;`r`n    while (WinHttpQueryDataAvailable(request, &available) && available > 0) {`r`n        if (GetTickCount64() > downloadDeadline) {`r`n            error = L"Launcher-Download hat das maximale Zeitlimit von 5 Minuten überschritten.";`r`n            f.close();`r`n            WinHttpCloseHandle(request);`r`n            WinHttpCloseHandle(connect);`r`n            WinHttpCloseHandle(session);`r`n            return false;`r`n        }'
+$s=$s.Replace($downloadLoop,$downloadReplacement)
+$extract='    if (!RunProcess(Quote(tar.wstring()) + L" -xf " + Quote(zip.wstring()) + L" -C " + Quote(target.wstring()), target, code, error)) return false;'
+if(-not $s.Contains($extract)){throw 'Extract anchor missing'}
+$s=$s.Replace($extract,'    if (!RunProcess(Quote(tar.wstring()) + L" -xf " + Quote(zip.wstring()) + L" -C " + Quote(target.wstring()), target, code, error, 120000)) return false;')
 $s=$s.Replace('Syntex Launcher Setup 0.16.6 RC1','Syntex Launcher Setup 0.16.7')
 $s=$s.Replace('Syntex Launcher Setup 0.16.6','Syntex Launcher Setup 0.16.7')
 $s=$s.Replace('SyntexLauncherSetup/0.16.6-RC1','SyntexLauncherSetup/0.16.7')
 $s=$s.Replace('DisplayVersion", L"0.16.6"','DisplayVersion", L"0.16.7"')
 Set-Content $SetupSource $s -Encoding utf8
-Write-Host 'SETUP_DETERMINISTIC_PROCESS_DRAIN_PATCH_PASS'
+Write-Host 'SETUP_DETERMINISTIC_PROCESS_DRAIN_AND_BOUNDED_IO_PATCH_PASS'
