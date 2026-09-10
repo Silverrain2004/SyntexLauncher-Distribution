@@ -13,59 +13,148 @@ permissions:
 jobs:
   validate:
     runs-on: windows-latest
-    timeout-minutes: 25
+    timeout-minutes: 20
     env:
-      GOOD_URL: https://github.com/Silverrain2004/SyntexLauncher-Distribution/releases/download/v0.16.7-ci-34467708548/SyntexLauncher-0.16.7-ci-win-x64.zip
-      GOOD_SHA: cc716db79bc5eb8cae80413aa2fe5cce519e05e3c2b12b9e11ae943c1780207f
-      GOOD_SIZE: 70090490
       BASE_URL: https://github.com/Silverrain2004/SyntexLauncher-Distribution/releases/download/v0.16.6/SyntexLauncher-0.16.6-win-x64.zip
       BASE_SHA: f34397dae9ca7986ef5d8f9183c6d4ee355126d2c9b913dea6eee561835ada74
       BASE_SIZE: 69903997
     steps:
       - uses: actions/checkout@v4
 
-      - name: Patch Setup source
-        shell: pwsh
-        run: ./scripts/Patch-SetupProcessShutdown.ps1 -SetupSource ./rc-src/Setup.cpp
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.400'
 
-      - name: Verify immutable inputs
+      - name: Prepare immutable 0.16.6 baseline
         shell: pwsh
         run: |
           $ErrorActionPreference='Stop'
           $work=Join-Path $env:RUNNER_TEMP 'setup-process-shutdown-v2'
+          $candidate=Join-Path $work 'candidate'
+          $runningRoot=Join-Path $work 'running-root'
           $dist=Join-Path $work 'dist'
-          New-Item -ItemType Directory -Force $work,$dist|Out-Null
-          function Get-Verified($url,$sha,$size,$name){
-            $p=Join-Path $work $name
-            Invoke-WebRequest $url -OutFile $p -UseBasicParsing
-            if((Get-Item $p).Length -ne [int64]$size){throw "$name size mismatch"}
-            if((Get-FileHash $p -Algorithm SHA256).Hash.ToLowerInvariant() -ne $sha){throw "$name hash mismatch"}
-            return $p
-          }
-          $base=Get-Verified $env:BASE_URL $env:BASE_SHA $env:BASE_SIZE 'base.zip'
-          $good=Get-Verified $env:GOOD_URL $env:GOOD_SHA $env:GOOD_SIZE 'good.zip'
+          $base=Join-Path $work 'base.zip'
+          New-Item -ItemType Directory -Force $work,$candidate,$runningRoot,$dist|Out-Null
+          Invoke-WebRequest $env:BASE_URL -OutFile $base -UseBasicParsing
+          if((Get-Item $base).Length -ne [int64]$env:BASE_SIZE){throw '0.16.6 baseline size changed'}
+          $sha=(Get-FileHash $base -Algorithm SHA256).Hash.ToLowerInvariant()
+          if($sha -ne $env:BASE_SHA){throw "0.16.6 baseline hash changed: $sha"}
+          Expand-Archive $base $candidate -Force
+          Expand-Archive $base $runningRoot -Force
           "WORK=$work"|Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          "CANDIDATE=$candidate"|Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          "RUNNING_ROOT=$runningRoot"|Out-File $env:GITHUB_ENV -Encoding utf8 -Append
           "DIST=$dist"|Out-File $env:GITHUB_ENV -Encoding utf8 -Append
           "BASE_ZIP=$base"|Out-File $env:GITHUB_ENV -Encoding utf8 -Append
-          "GOOD_ZIP=$good"|Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          Write-Host 'IMMUTABLE_0166_BASELINE_PASS'
 
-      - name: Build x64 setup
+      - name: Patch managed startup to defer on UI context
         shell: pwsh
         run: |
           $ErrorActionPreference='Stop'
-          @('#pragma once',("static constexpr wchar_t PAYLOAD_URL[] = L`"{0}`";" -f $env:GOOD_URL),("static constexpr wchar_t PAYLOAD_SHA256[] = L`"{0}`";" -f $env:GOOD_SHA),("static constexpr unsigned long long PAYLOAD_SIZE = {0}ULL;" -f $env:GOOD_SIZE))|Set-Content ./rc-src/PayloadContract.h -Encoding utf8
+          $patchDir=Join-Path $env:RUNNER_TEMP 'managed-startup-patcher-v2'
+          New-Item -ItemType Directory -Force $patchDir|Out-Null
+          Copy-Item .\rc-src\PatchManagedStartup.cs (Join-Path $patchDir 'Program.cs')
+          @'
+          <Project Sdk="Microsoft.NET.Sdk">
+            <PropertyGroup>
+              <OutputType>Exe</OutputType>
+              <TargetFramework>net10.0</TargetFramework>
+              <ImplicitUsings>enable</ImplicitUsings>
+              <Nullable>enable</Nullable>
+            </PropertyGroup>
+            <ItemGroup>
+              <PackageReference Include="Mono.Cecil" Version="0.11.6" />
+            </ItemGroup>
+          </Project>
+          '@|Set-Content (Join-Path $patchDir 'Patcher.csproj') -Encoding utf8
+          $output=dotnet run --project (Join-Path $patchDir 'Patcher.csproj') -c Release -- (Join-Path $env:CANDIDATE 'app')
+          $output|Write-Host
+          if($LASTEXITCODE-ne0){throw "Managed startup patch failed: $LASTEXITCODE"}
+          if(($output -join "`n") -notmatch 'PATCH_OK_DEFERRED_UI:'){throw 'Deferred UI patch marker missing'}
+          Write-Host 'DEFERRED_UI_MANAGED_PATCH_PASS'
+
+      - name: Locate Visual C++ x64 toolchain
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
           $vswhere=Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
           $vs=&$vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
-          if([string]::IsNullOrWhiteSpace($vs)){throw 'VC++ x64 missing'}
-          $dev=Join-Path $vs 'Common7\Tools\VsDevCmd.bat'
-          $out=Join-Path $env:DIST 'SyntexSetup-0.16.7-x64-PROCESS-SHUTDOWN-V2.exe'
-          $cmd=Join-Path $env:RUNNER_TEMP 'build-process-shutdown-v2.cmd'
-          @('@echo on',"call `"$dev`" -arch=x64 -host_arch=x64",'if errorlevel 1 exit /b %errorlevel%',"cl.exe /nologo /DNOMINMAX /utf-8 /std:c++20 /EHsc /W4 /O2 /MT /I`"$env:GITHUB_WORKSPACE\rc-src`" `"$env:GITHUB_WORKSPACE\rc-src\Setup.cpp`" /Fe:`"$out`" /link /SUBSYSTEM:WINDOWS /MACHINE:X64 winhttp.lib bcrypt.lib shell32.lib ole32.lib user32.lib gdi32.lib advapi32.lib comctl32.lib uxtheme.lib",'exit /b %errorlevel%')|Set-Content $cmd -Encoding ascii
+          if([string]::IsNullOrWhiteSpace($vs)){throw 'VC++ x64 tools missing'}
+          "VSDEVCMD=$(Join-Path $vs 'Common7\Tools\VsDevCmd.bat')"|Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Build 0.16.7 native host and update agent
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $cmd=Join-Path $env:RUNNER_TEMP 'build-native-v2.cmd'
+          @(
+            '@echo on',
+            "call `"$env:VSDEVCMD`" -arch=x64 -host_arch=x64",
+            'if errorlevel 1 exit /b %errorlevel%',
+            "cl.exe /nologo /DNOMINMAX /utf-8 /std:c++20 /EHsc /W4 /O1 /Os /GL /MT `"$env:GITHUB_WORKSPACE\rc-src\LauncherHost.cpp`" /Fe:`"$env:CANDIDATE\SyntexLauncher.exe`" /link /SUBSYSTEM:WINDOWS /MACHINE:X64 /LTCG /OPT:REF /OPT:ICF winhttp.lib bcrypt.lib shell32.lib user32.lib",
+            'if errorlevel 1 exit /b %errorlevel%',
+            "cl.exe /nologo /DNOMINMAX /utf-8 /std:c++20 /EHsc /W4 /O1 /Os /GL /MT `"$env:GITHUB_WORKSPACE\rc-src\UpdateAgent.cpp`" /Fe:`"$env:CANDIDATE\app\SyntexUpdateAgent.exe`" /link /SUBSYSTEM:WINDOWS /MACHINE:X64 /LTCG /OPT:REF /OPT:ICF shell32.lib user32.lib",
+            'exit /b %errorlevel%'
+          )|Set-Content $cmd -Encoding ascii
           &cmd.exe /d /c $cmd
-          if($LASTEXITCODE-ne0){throw 'Setup build failed'}
+          if($LASTEXITCODE-ne0){throw "Native build failed: $LASTEXITCODE"}
+          Write-Host 'NATIVE_0167_X64_BUILD_PASS'
+
+      - name: Require visible window three consecutive times
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $host=Join-Path $env:CANDIDATE 'SyntexLauncher.exe'
+          for($i=1;$i-le3;$i++){
+            $p=Start-Process $host -ArgumentList '--ci-gui-self-test' -WorkingDirectory $env:CANDIDATE -PassThru
+            if(-not $p.WaitForExit(60000)){
+              try{$p.Kill($true)}catch{}
+              throw "Visible-window repetition $i timed out"
+            }
+            if($p.ExitCode-ne0){
+              Get-ChildItem (Join-Path $env:CANDIDATE 'storage\logs\launcher-startup') -File -ErrorAction SilentlyContinue|ForEach-Object{Get-Content $_.FullName -Raw|Write-Host}
+              throw "Visible-window repetition $i failed: $($p.ExitCode)"
+            }
+            Write-Host "VISIBLE_WINDOW_REPEAT_${i}_PASS"
+          }
+
+      - name: Package fresh candidate
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $zip=Join-Path $env:DIST 'SyntexLauncher-0.16.7-deferred-ui-ci-win-x64.zip'
+          Push-Location $env:CANDIDATE
+          try{&7z a -tzip -mx=9 -mfb=258 -mpass=15 -y $zip '.\*'|Out-Host}finally{Pop-Location}
+          if($LASTEXITCODE-ne0){throw "7z failed: $LASTEXITCODE"}
+          $hash=(Get-FileHash $zip -Algorithm SHA256).Hash.ToLowerInvariant()
+          $size=(Get-Item $zip).Length
+          "CANDIDATE_ZIP=$zip"|Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          "CANDIDATE_SHA=$hash"|Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          "CANDIDATE_SIZE=$size"|Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          Write-Host "FRESH_CANDIDATE_SHA=$hash"
+          Write-Host "FRESH_CANDIDATE_SIZE=$size"
+
+      - name: Patch and build x64 Setup candidate
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          ./scripts/Patch-SetupProcessShutdown.ps1 -SetupSource ./rc-src/Setup.cpp
+          @('#pragma once',("static constexpr wchar_t PAYLOAD_URL[] = L`"https://ci.invalid/syntex-0.16.7.zip`";"),("static constexpr wchar_t PAYLOAD_SHA256[] = L`"{0}`";" -f $env:CANDIDATE_SHA),("static constexpr unsigned long long PAYLOAD_SIZE = {0}ULL;" -f $env:CANDIDATE_SIZE))|Set-Content ./rc-src/PayloadContract.h -Encoding utf8
+          $out=Join-Path $env:DIST 'SyntexSetup-0.16.7-x64-DEFERRED-UI-TEST.exe'
+          $cmd=Join-Path $env:RUNNER_TEMP 'build-setup-deferred-ui.cmd'
+          @(
+            '@echo on',
+            "call `"$env:VSDEVCMD`" -arch=x64 -host_arch=x64",
+            'if errorlevel 1 exit /b %errorlevel%',
+            "cl.exe /nologo /DNOMINMAX /utf-8 /std:c++20 /EHsc /W4 /O2 /MT /I`"$env:GITHUB_WORKSPACE\rc-src`" `"$env:GITHUB_WORKSPACE\rc-src\Setup.cpp`" /Fe:`"$out`" /link /SUBSYSTEM:WINDOWS /MACHINE:X64 winhttp.lib bcrypt.lib shell32.lib ole32.lib user32.lib gdi32.lib advapi32.lib comctl32.lib uxtheme.lib",
+            'exit /b %errorlevel%'
+          )|Set-Content $cmd -Encoding ascii
+          &cmd.exe /d /c $cmd
+          if($LASTEXITCODE-ne0){throw "Setup build failed: $LASTEXITCODE"}
           "FINAL_SETUP=$out"|Out-File $env:GITHUB_ENV -Encoding utf8 -Append
 
-      - name: Verify selftests and AMD64
+      - name: Verify Setup selftests and AMD64
         shell: pwsh
         run: |
           $ErrorActionPreference='Stop'
@@ -74,56 +163,72 @@ jobs:
             if($p.ExitCode-ne0){throw "$arg failed: $($p.ExitCode)"}
           }
           $b=[IO.File]::ReadAllBytes($env:FINAL_SETUP)
-          if($b[0]-ne0x4d -or $b[1]-ne0x5a){throw 'MZ missing'}
+          if($b[0]-ne0x4d-or$b[1]-ne0x5a){throw 'MZ missing'}
           $lf=[BitConverter]::ToInt32($b,0x3c)
           if([BitConverter]::ToUInt16($b,$lf+4)-ne0x8664){throw 'Setup is not AMD64'}
-          Write-Host 'SETUP_PROCESS_SHUTDOWN_X64_SELFTEST_PASS'
+          Write-Host 'SETUP_DEFERRED_UI_X64_SELFTEST_PASS'
 
-      - name: Setup itself terminates running launcher
+      - name: Real open-launcher repair and visible restart
         shell: pwsh
         run: |
           $ErrorActionPreference='Stop'
-          $root=Join-Path $env:WORK 'running-root'
-          Expand-Archive $env:BASE_ZIP $root -Force
+          $root=$env:RUNNING_ROOT
           foreach($d in @('storage','data','instances','runtimes')){
             New-Item -ItemType Directory -Force (Join-Path $root $d)|Out-Null
             "KEEP-$d"|Set-Content (Join-Path $root "$d\keep.txt") -Encoding ascii
           }
           $old=Start-Process (Join-Path $root 'SyntexLauncher.exe') -WorkingDirectory $root -PassThru
           Start-Sleep -Seconds 3
-          if($old.HasExited){throw "old launcher exited too early: $($old.ExitCode)"}
+          if($old.HasExited){throw "Old launcher exited too early: $($old.ExitCode)"}
           $oldPid=$old.Id
-          $stop=Start-Process $env:FINAL_SETUP -ArgumentList @('--ci-stop-launcher',"`"$root`"") -PassThru -Wait
-          if($stop.ExitCode-ne0){throw "setup shutdown exit $($stop.ExitCode)"}
-          if(Get-Process -Id $oldPid -ErrorAction SilentlyContinue){throw 'pre-existing launcher survived setup shutdown'}
-          Write-Host 'SETUP_OWN_PROCESS_SHUTDOWN_PASS'
-          "TEST_ROOT=$root"|Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          $setup=Start-Process $env:FINAL_SETUP -ArgumentList @('--ci-install-local',"`"$root`"","`"$env:CANDIDATE_ZIP`"") -PassThru
+          if(-not $setup.WaitForExit(180000)){
+            try{$setup.Kill($true)}catch{}
+            Get-Process SyntexLauncher -ErrorAction SilentlyContinue|Stop-Process -Force -ErrorAction SilentlyContinue
+            throw 'Integrated Setup repair exceeded 180 seconds'
+          }
+          if($setup.ExitCode-ne0){
+            Get-ChildItem (Join-Path $root 'storage\logs') -Recurse -File -ErrorAction SilentlyContinue|ForEach-Object{Write-Host "--- $($_.FullName) ---";Get-Content $_.FullName -Raw|Write-Host}
+            throw "Integrated Setup repair failed: $($setup.ExitCode)"
+          }
+          if(Get-Process -Id $oldPid -ErrorAction SilentlyContinue){throw 'Pre-existing launcher survived Setup repair'}
+          foreach($d in @('storage','data','instances','runtimes')){
+            if((Get-Content (Join-Path $root "$d\keep.txt") -Raw).Trim()-ne"KEEP-$d"){throw "Setup changed $d"}
+          }
+          $logs=Join-Path $root 'storage\logs\launcher-startup'
+          $text=(Get-ChildItem $logs -File|ForEach-Object{Get-Content $_.FullName -Raw})-join"`n"
+          if($text-notmatch'Startprüfung erfolgreich: sichtbares Launcher-Fenster erkannt'){throw 'Visible restart marker missing'}
+          Write-Host 'INTEGRATED_OPEN_LAUNCHER_REPAIR_VISIBLE_RESTART_PASS'
 
-      - name: Repair after shutdown and verify visible restart
+      - name: Repeat repair while 0.16.7 is running
         shell: pwsh
         run: |
           $ErrorActionPreference='Stop'
-          $root=$env:TEST_ROOT
-          $setup=Start-Process $env:FINAL_SETUP -ArgumentList @('--ci-install-local',"`"$root`"","`"$env:GOOD_ZIP`"") -PassThru -Wait
+          $root=$env:RUNNING_ROOT
+          $before=(Get-ChildItem (Join-Path $root 'storage\logs\launcher-startup') -File).Count
+          $setup=Start-Process $env:FINAL_SETUP -ArgumentList @('--ci-install-local',"`"$root`"","`"$env:CANDIDATE_ZIP`"") -PassThru
+          if(-not $setup.WaitForExit(180000)){
+            try{$setup.Kill($true)}catch{}
+            throw 'Second running-launcher repair exceeded 180 seconds'
+          }
           if($setup.ExitCode-ne0){
             Get-ChildItem (Join-Path $root 'storage\logs') -Recurse -File -ErrorAction SilentlyContinue|ForEach-Object{Write-Host "--- $($_.FullName) ---";Get-Content $_.FullName -Raw|Write-Host}
-            throw "setup exit $($setup.ExitCode)"
+            throw "Second running-launcher repair failed: $($setup.ExitCode)"
           }
+          $after=(Get-ChildItem (Join-Path $root 'storage\logs\launcher-startup') -File).Count
+          if($after-le$before){throw 'Second repair produced no new startup health log'}
           foreach($d in @('storage','data','instances','runtimes')){
-            if((Get-Content (Join-Path $root "$d\keep.txt") -Raw).Trim() -ne "KEEP-$d"){throw "setup changed $d"}
+            if((Get-Content (Join-Path $root "$d\keep.txt") -Raw).Trim()-ne"KEEP-$d"){throw "Second repair changed $d"}
           }
-          $startup=Join-Path $root 'storage\logs\launcher-startup'
-          $latest=Get-ChildItem $startup -File|Sort-Object LastWriteTimeUtc -Descending|Select-Object -First 1
-          $text=Get-Content $latest.FullName -Raw
-          Write-Host $text
-          if(-not $text.Contains('Startprüfung erfolgreich: sichtbares Launcher-Fenster erkannt.')){throw 'visible launcher marker missing'}
           Get-Process SyntexLauncher -ErrorAction SilentlyContinue|Stop-Process -Force -ErrorAction SilentlyContinue
-          Write-Host 'SETUP_REPAIR_AFTER_SHUTDOWN_VISIBLE_START_PASS'
+          Write-Host 'SECOND_RUNNING_0167_REPAIR_VISIBLE_RESTART_PASS'
 
-      - name: Upload candidate
+      - name: Upload verified test artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: SyntexSetup-0.16.7-x64-process-shutdown-v2
-          path: ${{ env.FINAL_SETUP }}
+          name: Syntex-0.16.7-deferred-ui-setup-test
+          path: |
+            ${{ env.FINAL_SETUP }}
+            ${{ env.CANDIDATE_ZIP }}
           if-no-files-found: error
           retention-days: 7
