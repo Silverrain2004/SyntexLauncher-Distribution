@@ -1,6 +1,7 @@
 #define UNICODE
 #define _UNICODE
 #include <windows.h>
+#include <tlhelp32.h>
 #include <filesystem>
 #include <fstream>
 #include <string>
@@ -98,6 +99,48 @@ static bool CopyTree(const fs::path& source, const fs::path& target, std::wstrin
     return true;
 }
 
+static bool IsPathInside(const fs::path& candidate, const fs::path& directory) {
+    std::wstring value = fs::absolute(candidate).lexically_normal().wstring();
+    std::wstring prefix = fs::absolute(directory).lexically_normal().wstring();
+    while (!prefix.empty() && (prefix.back() == L'\\' || prefix.back() == L'/')) prefix.pop_back();
+    prefix.push_back(L'\\');
+    return value.size() >= prefix.size() && _wcsnicmp(value.c_str(), prefix.c_str(), prefix.size()) == 0;
+}
+
+static void StopLauncherProgramProcesses(const fs::path& root) noexcept {
+    try {
+        const fs::path hostPath = fs::absolute(root / L"SyntexLauncher.exe").lexically_normal();
+        const fs::path appPath = fs::absolute(root / L"app").lexically_normal();
+        HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+        if (snapshot == INVALID_HANDLE_VALUE) return;
+
+        PROCESSENTRY32W entry{};
+        entry.dwSize = sizeof(entry);
+        if (Process32FirstW(snapshot, &entry)) {
+            do {
+                if (entry.th32ProcessID == 0 || entry.th32ProcessID == GetCurrentProcessId()) continue;
+                HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_TERMINATE | SYNCHRONIZE, FALSE, entry.th32ProcessID);
+                if (!process) continue;
+                std::wstring image(32768, L'\0');
+                DWORD imageLength = static_cast<DWORD>(image.size());
+                bool belongsToLauncher = false;
+                if (QueryFullProcessImageNameW(process, 0, image.data(), &imageLength) && imageLength > 0) {
+                    image.resize(imageLength);
+                    const fs::path processPath = fs::path(image).lexically_normal();
+                    belongsToLauncher = _wcsicmp(processPath.c_str(), hostPath.c_str()) == 0 || IsPathInside(processPath, appPath);
+                }
+                if (belongsToLauncher) {
+                    TerminateProcess(process, 206);
+                    WaitForSingleObject(process, 5000);
+                }
+                CloseHandle(process);
+            } while (Process32NextW(snapshot, &entry));
+        }
+        CloseHandle(snapshot);
+    } catch (...) {
+    }
+}
+
 static bool BackupCurrent(const fs::path& root, const fs::path& rollback, std::wstring& error) {
     std::error_code ec;
     fs::remove_all(rollback, ec);
@@ -154,7 +197,10 @@ static bool RestoreRollback(const fs::path& root, const fs::path& rollback, std:
     }
     std::error_code ec;
     fs::remove_all(root / L"app", ec);
-    ec.clear();
+    if (ec) {
+        error = L"Neue Programmdateien konnten vor dem Rollback nicht entfernt werden (" + std::to_wstring(ec.value()) + L").";
+        return false;
+    }
     if (!CopyTree(rollback / L"app", root / L"app", error)) return false;
     fs::copy_file(rollback / L"SyntexLauncher.exe", root / L"SyntexLauncher.exe", fs::copy_options::overwrite_existing, ec);
     if (ec) {
@@ -240,6 +286,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
     }
 
     if (!InstallStage(root, stage, error)) {
+        StopLauncherProgramProcesses(root);
         std::wstring restoreError;
         const bool restored = RestoreRollback(root, rollback, restoreError);
         WriteLog(root, L"UPDATE_INSTALL_FAILED\r\n" + error + L"\r\nRollback: " + (restored ? L"erfolgreich" : L"fehlgeschlagen: " + restoreError) + L"\r\n");
@@ -248,7 +295,11 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
     }
 
     DWORD healthExit = 0;
-    if (!LaunchAndWait(root / L"SyntexLauncher.exe", L"--post-update-health-check", 120000, healthExit, error) || healthExit != 0) {
+    // LauncherHost owns the real-window health check and may use up to 120 seconds.
+    // The outer agent must wait longer so the host can terminate its managed child cleanly before rollback.
+    if (!LaunchAndWait(root / L"SyntexLauncher.exe", L"--post-update-health-check", 135000, healthExit, error) || healthExit != 0) {
+        StopLauncherProgramProcesses(root);
+        Sleep(250);
         std::wstring restoreError;
         const bool restored = RestoreRollback(root, rollback, restoreError);
         WriteLog(root,
