@@ -1,0 +1,167 @@
+name: Syntex 0.16.7 Storage File Isolation
+
+on:
+  push:
+    branches:
+      - fix/0.16.7-setup-process-shutdown-v2
+    paths:
+      - '.github/workflows/0167-storage-file-isolation.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  isolate:
+    runs-on: windows-2025
+    timeout-minutes: 15
+    env:
+      BASE_URL: https://github.com/Silverrain2004/SyntexLauncher-Distribution/releases/download/v0.16.6/SyntexLauncher-0.16.6-win-x64.zip
+      BASE_SHA: f34397dae9ca7986ef5d8f9183c6d4ee355126d2c9b913dea6eee561835ada74
+      BASE_SIZE: '69903997'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.400
+
+      - name: Build current patched candidate
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $work=Join-Path $env:RUNNER_TEMP 'storage-file-isolation'
+          $zip=Join-Path $work 'base.zip'
+          $seed=Join-Path $work 'seed'
+          New-Item -ItemType Directory -Force $work,$seed|Out-Null
+          Invoke-WebRequest $env:BASE_URL -OutFile $zip -UseBasicParsing
+          if((Get-Item $zip).Length-ne[int64]$env:BASE_SIZE){throw '0.16.6 size changed'}
+          if((Get-FileHash $zip -Algorithm SHA256).Hash.ToLowerInvariant()-ne$env:BASE_SHA){throw '0.16.6 hash changed'}
+          Expand-Archive $zip $seed -Force
+
+          $patchDir=Join-Path $work 'patcher'
+          New-Item -ItemType Directory -Force $patchDir|Out-Null
+          Copy-Item .\rc-src\PatchManagedStartup.cs (Join-Path $patchDir 'Program.cs')
+          @'
+          <Project Sdk="Microsoft.NET.Sdk">
+            <PropertyGroup><OutputType>Exe</OutputType><TargetFramework>net10.0</TargetFramework><ImplicitUsings>enable</ImplicitUsings><Nullable>enable</Nullable></PropertyGroup>
+            <ItemGroup><PackageReference Include="Mono.Cecil" Version="0.11.6" /></ItemGroup>
+          </Project>
+          '@|Set-Content (Join-Path $patchDir 'Patcher.csproj') -Encoding utf8
+          $patchOutput=dotnet run --project (Join-Path $patchDir 'Patcher.csproj') -c Release -- (Join-Path $seed 'app')
+          $patchOutput|Write-Host
+          if($LASTEXITCODE-ne0-or($patchOutput-join"`n")-notmatch'PATCH_OK_AVALONIA_DISPATCHER:'){throw 'managed patch failed'}
+
+          $vswhere=Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+          $vs=&$vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if([string]::IsNullOrWhiteSpace($vs)){throw 'VC++ x64 tools missing'}
+          $dev=Join-Path $vs 'Common7\Tools\VsDevCmd.bat'
+          $cmd=Join-Path $work 'build-host.cmd'
+          @('@echo on',"call `"$dev`" -arch=x64 -host_arch=x64",'if errorlevel 1 exit /b %errorlevel%',"cl.exe /nologo /DNOMINMAX /utf-8 /std:c++20 /EHsc /W4 /O1 /Os /GL /MT `"$env:GITHUB_WORKSPACE\rc-src\LauncherHost.cpp`" /Fe:`"$seed\SyntexLauncher.exe`" /link /SUBSYSTEM:WINDOWS /MACHINE:X64 /LTCG /OPT:REF /OPT:ICF winhttp.lib bcrypt.lib shell32.lib user32.lib",'exit /b %errorlevel%')|Set-Content $cmd -Encoding ascii
+          &cmd.exe /d /c $cmd
+          if($LASTEXITCODE-ne0){throw 'host build failed'}
+          "WORK=$work"|Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          "SEED=$seed"|Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Create real first-run persistent state
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $root=$env:SEED
+          $hostExe=Join-Path $root 'SyntexLauncher.exe'
+          $p=Start-Process $hostExe -ArgumentList '--post-update-health-check' -WorkingDirectory $root -PassThru
+          if(-not $p.WaitForExit(30000)){try{$p.Kill($true)}catch{};throw 'seed first start timeout'}
+          if($p.ExitCode-ne0){throw "seed first start failed $($p.ExitCode)"}
+          $appPrefix=(Join-Path $root 'app')+'\'
+          $children=@(Get-CimInstance Win32_Process|Where-Object{$_.ExecutablePath -and ([IO.Path]::GetFullPath($_.ExecutablePath)).StartsWith($appPrefix,[StringComparison]::OrdinalIgnoreCase)})
+          if(-not $children){throw 'seed child missing'}
+          foreach($c in $children){$proc=Get-Process -Id $c.ProcessId -ErrorAction Stop;[void]$proc.CloseMainWindow()}
+          $deadline=(Get-Date).AddSeconds(15)
+          do{Start-Sleep -Milliseconds 100;$left=@(Get-CimInstance Win32_Process|Where-Object{$_.ExecutablePath -and (([IO.Path]::GetFullPath($_.ExecutablePath)-ieq$hostExe)-or([IO.Path]::GetFullPath($_.ExecutablePath)).StartsWith($appPrefix,[StringComparison]::OrdinalIgnoreCase))})}while($left-and(Get-Date)-lt$deadline)
+          if($left){$left|ForEach-Object{Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue};throw 'seed child did not close'}
+          $state=Join-Path $env:WORK 'state'
+          Copy-Item (Join-Path $root 'storage') $state -Recurse
+          Get-ChildItem $state -Recurse -File|ForEach-Object{Write-Host "STATE_FILE=$($_.FullName.Substring($state.Length+1)) SIZE=$($_.Length)";if($_.Extension-ieq'.json'){Write-Host (Get-Content $_.FullName -Raw)}}
+          "STATE=$state"|Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          Write-Host 'FIRST_RUN_STATE_CAPTURED'
+
+      - name: Prepare isolated roots
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $cases=@('settings','projects','log','settings-projects')
+          foreach($case in $cases){
+            $root=Join-Path $env:WORK $case
+            Copy-Item $env:SEED $root -Recurse
+            Remove-Item (Join-Path $root 'storage') -Recurse -Force -ErrorAction SilentlyContinue
+            New-Item -ItemType Directory -Force (Join-Path $root 'storage')|Out-Null
+            if($case-eq'settings'-or$case-eq'settings-projects'){
+              $src=Join-Path $env:STATE 'data\settings\launcher-settings.json'
+              $dst=Join-Path $root 'storage\data\settings\launcher-settings.json'
+              New-Item -ItemType Directory -Force (Split-Path $dst)|Out-Null
+              Copy-Item $src $dst
+            }
+            if($case-eq'projects'-or$case-eq'settings-projects'){
+              $src=Join-Path $env:STATE 'data\projects.json'
+              $dst=Join-Path $root 'storage\data\projects.json'
+              New-Item -ItemType Directory -Force (Split-Path $dst)|Out-Null
+              Copy-Item $src $dst
+            }
+            if($case-eq'log'){
+              $src=(Get-ChildItem (Join-Path $env:STATE 'logs\launcher-startup') -File|Select-Object -First 1).FullName
+              $dst=Join-Path $root 'storage\logs\launcher-startup\prior.log'
+              New-Item -ItemType Directory -Force (Split-Path $dst)|Out-Null
+              Copy-Item $src $dst
+            }
+            "CASE_$($case.ToUpper().Replace('-','_'))=$root"|Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          }
+          Write-Host 'ISOLATED_STORAGE_ROOTS_READY'
+
+      - name: Test settings only
+        id: settings
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          $p=Start-Process (Join-Path $env:CASE_SETTINGS 'SyntexLauncher.exe') -ArgumentList '--post-update-health-check' -WorkingDirectory $env:CASE_SETTINGS -PassThru
+          if(-not $p.WaitForExit(30000)){try{$p.Kill($true)}catch{};throw 'SETTINGS_ONLY_TIMEOUT'}
+          if($p.ExitCode-ne0){throw "SETTINGS_ONLY_EXIT_$($p.ExitCode)"}
+          Write-Host 'SETTINGS_ONLY_PASS'
+
+      - name: Test projects only
+        id: projects
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          $p=Start-Process (Join-Path $env:CASE_PROJECTS 'SyntexLauncher.exe') -ArgumentList '--post-update-health-check' -WorkingDirectory $env:CASE_PROJECTS -PassThru
+          if(-not $p.WaitForExit(30000)){try{$p.Kill($true)}catch{};throw 'PROJECTS_ONLY_TIMEOUT'}
+          if($p.ExitCode-ne0){throw "PROJECTS_ONLY_EXIT_$($p.ExitCode)"}
+          Write-Host 'PROJECTS_ONLY_PASS'
+
+      - name: Test prior startup log only
+        id: log
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          $p=Start-Process (Join-Path $env:CASE_LOG 'SyntexLauncher.exe') -ArgumentList '--post-update-health-check' -WorkingDirectory $env:CASE_LOG -PassThru
+          if(-not $p.WaitForExit(30000)){try{$p.Kill($true)}catch{};throw 'LOG_ONLY_TIMEOUT'}
+          if($p.ExitCode-ne0){throw "LOG_ONLY_EXIT_$($p.ExitCode)"}
+          Write-Host 'LOG_ONLY_PASS'
+
+      - name: Test settings and projects together
+        id: both
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          $p=Start-Process (Join-Path $env:CASE_SETTINGS_PROJECTS 'SyntexLauncher.exe') -ArgumentList '--post-update-health-check' -WorkingDirectory $env:CASE_SETTINGS_PROJECTS -PassThru
+          if(-not $p.WaitForExit(30000)){try{$p.Kill($true)}catch{};throw 'SETTINGS_PROJECTS_TIMEOUT'}
+          if($p.ExitCode-ne0){throw "SETTINGS_PROJECTS_EXIT_$($p.ExitCode)"}
+          Write-Host 'SETTINGS_PROJECTS_PASS'
+
+      - name: Report isolation matrix
+        if: always()
+        shell: pwsh
+        run: |
+          Write-Host 'STORAGE_FILE_ISOLATION_RESULTS'
+          Write-Host "SETTINGS=${{ steps.settings.outcome }}"
+          Write-Host "PROJECTS=${{ steps.projects.outcome }}"
+          Write-Host "LOG=${{ steps.log.outcome }}"
+          Write-Host "SETTINGS_PROJECTS=${{ steps.both.outcome }}"
