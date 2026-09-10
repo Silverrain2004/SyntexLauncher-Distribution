@@ -6,6 +6,7 @@ on:
     paths:
       - '.github/workflows/publish-stable-0167.yml'
       - 'scripts/Assert-NewStableVersion.ps1'
+      - 'distribution.json'
   push:
     branches: [main]
     paths:
@@ -38,10 +39,14 @@ env:
   PAYLOAD_URL: 'https://github.com/Silverrain2004/SyntexLauncher-Distribution/releases/download/v0.16.7-ci-34467708548/SyntexLauncher-0.16.7-ci-win-x64.zip'
   PAYLOAD_SHA256: 'cc716db79bc5eb8cae80413aa2fe5cce519e05e3c2b12b9e11ae943c1780207f'
   PAYLOAD_SIZE: '70090490'
+  STABLE_PAYLOAD_URL: 'https://github.com/Silverrain2004/SyntexLauncher-Distribution/releases/download/v0.16.7/SyntexLauncher-0.16.7-win-x64.zip'
   SETUP_RUN_ID: '34472026462'
   SETUP_ARTIFACT: 'SyntexSetup-0.16.7-x64-final-v3-current-source'
   SETUP_SHA256: '3b2bd876de661a8ee73745ede4f1a4ceccb8b4199f88080d62098878fc8b8000'
   SETUP_SIZE: '394752'
+  STABLE_SETUP_URL: 'https://github.com/Silverrain2004/SyntexLauncher-Distribution/releases/download/v0.16.7/SyntexSetup-0.16.7-x64.exe'
+  OLD_PAYLOAD_SHA256: 'f34397dae9ca7986ef5d8f9183c6d4ee355126d2c9b913dea6eee561835ada74'
+  OLD_PAYLOAD_SIZE: '69903997'
 
 jobs:
   immutable-publish-contract:
@@ -138,6 +143,23 @@ jobs:
           $hash = (Get-FileHash $setup -Algorithm SHA256).Hash.ToLowerInvariant()
           if ($hash -ne $env:SETUP_SHA256) { throw "Approved Setup SHA-256 mismatch: $hash" }
           Write-Host 'APPROVED_SETUP_EXACT_MATCH_PASS'
+
+      - name: Verify fail-safe manifest handoff contract without mutation
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $manifest = Get-Content '${{ github.workspace }}/distribution.json' -Raw | ConvertFrom-Json
+          if ([string]$manifest.version -cne '0.16.6') { throw "Expected current stable manifest 0.16.6 before promotion, got $($manifest.version)." }
+          if ([string]$manifest.payload.sha256 -cne $env:OLD_PAYLOAD_SHA256) { throw 'Current stable manifest payload hash changed unexpectedly.' }
+          if ([int64]$manifest.payload.size -ne [int64]$env:OLD_PAYLOAD_SIZE) { throw 'Current stable manifest payload size changed unexpectedly.' }
+          $copy = $manifest | ConvertTo-Json -Depth 20 | ConvertFrom-Json
+          $copy.version = $env:VERSION
+          $copy.payload.url = $env:STABLE_PAYLOAD_URL
+          $copy.payload.sha256 = $env:PAYLOAD_SHA256
+          $copy.payload.size = [int64]$env:PAYLOAD_SIZE
+          $copy.publishedUtc = '2099-01-01T00:00:00Z'
+          if ([string]$copy.version -cne '0.16.7' -or [string]$copy.payload.url -cne $env:STABLE_PAYLOAD_URL -or [string]$copy.payload.sha256 -cne $env:PAYLOAD_SHA256 -or [int64]$copy.payload.size -ne [int64]$env:PAYLOAD_SIZE) { throw 'Manifest promotion dry-run produced an unexpected contract.' }
+          Write-Host 'STABLE_MANIFEST_HANDOFF_DRY_RUN_PASS'
           Write-Host 'STABLE_0_16_7_DRY_RUN_ALL_INPUTS_VERIFIED'
 
   publish:
@@ -212,3 +234,53 @@ jobs:
           gh release create $env:TAG $env:PAYLOAD_FILE $env:SETUP_FILE --repo '${{ github.repository }}' --target '${{ github.sha }}' --title 'Syntex Launcher 0.16.7' --notes 'Verified Windows x64 stable release. Transactional repair/update, visible-launcher healthcheck, automatic rollback, and preservation of storage/data/instances/runtimes were validated before publication.'
           if ($LASTEXITCODE -ne 0) { throw 'Stable release creation failed. No overwrite fallback is permitted.' }
           Write-Host 'STABLE_0_16_7_RELEASE_CREATED_APPEND_ONLY'
+
+      - name: Verify newly published immutable assets before manifest promotion
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $verify = Join-Path $env:RUNNER_TEMP 'stable-0167-post-publish'
+          New-Item -ItemType Directory -Force $verify | Out-Null
+          $payload = Join-Path $verify 'SyntexLauncher-0.16.7-win-x64.zip'
+          $setup = Join-Path $verify 'SyntexSetup-0.16.7-x64.exe'
+          Invoke-WebRequest $env:STABLE_PAYLOAD_URL -OutFile $payload -UseBasicParsing
+          Invoke-WebRequest $env:STABLE_SETUP_URL -OutFile $setup -UseBasicParsing
+          if ((Get-Item $payload).Length -ne [int64]$env:PAYLOAD_SIZE) { throw 'Published stable payload size mismatch.' }
+          if ((Get-FileHash $payload -Algorithm SHA256).Hash.ToLowerInvariant() -ne $env:PAYLOAD_SHA256) { throw 'Published stable payload hash mismatch.' }
+          if ((Get-Item $setup).Length -ne [int64]$env:SETUP_SIZE) { throw 'Published stable Setup size mismatch.' }
+          if ((Get-FileHash $setup -Algorithm SHA256).Hash.ToLowerInvariant() -ne $env:SETUP_SHA256) { throw 'Published stable Setup hash mismatch.' }
+          Write-Host 'NEW_STABLE_ASSETS_REDOWNLOADED_AND_VERIFIED'
+
+      - name: Promote stable manifest without overwriting concurrent main changes
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          git fetch origin main
+          $localHead = (git rev-parse HEAD).Trim()
+          $remoteHead = (git rev-parse origin/main).Trim()
+          if ($localHead -cne $remoteHead) { throw "main advanced during publication ($localHead -> $remoteHead). Stable release exists, but manifest remains safely unchanged." }
+
+          $manifestPath = '${{ github.workspace }}/distribution.json'
+          $manifest = Get-Content $manifestPath -Raw | ConvertFrom-Json
+          if ([string]$manifest.version -cne '0.16.6') { throw "Manifest is no longer at expected 0.16.6 baseline: $($manifest.version)" }
+          if ([string]$manifest.payload.sha256 -cne $env:OLD_PAYLOAD_SHA256) { throw 'Manifest baseline payload hash changed; refusing promotion.' }
+          if ([int64]$manifest.payload.size -ne [int64]$env:OLD_PAYLOAD_SIZE) { throw 'Manifest baseline payload size changed; refusing promotion.' }
+
+          $manifest.version = $env:VERSION
+          $manifest.payload.url = $env:STABLE_PAYLOAD_URL
+          $manifest.payload.sha256 = $env:PAYLOAD_SHA256
+          $manifest.payload.size = [int64]$env:PAYLOAD_SIZE
+          $manifest.publishedUtc = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
+          $json = $manifest | ConvertTo-Json -Depth 20
+          [IO.File]::WriteAllText($manifestPath, $json + [Environment]::NewLine, [Text.UTF8Encoding]::new($false))
+
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add distribution.json
+          git diff --cached --quiet
+          if ($LASTEXITCODE -eq 0) { throw 'Manifest promotion produced no change.' }
+          git commit -m 'Promote stable manifest to Syntex 0.16.7'
+          if ($LASTEXITCODE -ne 0) { throw 'Could not commit stable manifest promotion.' }
+          git push origin HEAD:main
+          if ($LASTEXITCODE -ne 0) { throw 'Stable release exists, but manifest push failed safely. No force push is permitted.' }
+          Write-Host 'STABLE_0_16_7_MANIFEST_PROMOTED_AFTER_ASSET_VERIFICATION'
