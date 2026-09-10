@@ -1,0 +1,98 @@
+name: Syntex 0.16.7 Real Window Healthcheck Selftest
+
+on:
+  push:
+    branches: ['feat/0.16.7-self-update']
+    paths:
+      - '.github/workflows/0167-window-healthcheck-selftest.yml'
+      - 'rc-src/LauncherHost.cpp'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows-real-window:
+    runs-on: windows-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/0.16.7-self-update
+
+      - name: Locate Visual C++ x64 toolchain
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+          $vs = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if ([string]::IsNullOrWhiteSpace($vs)) { throw 'Visual C++ x64 tools not found.' }
+          "VSDEVCMD=$(Join-Path $vs 'Common7\Tools\VsDevCmd.bat')" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Build x64 host and real visible child window
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $root = Join-Path $env:RUNNER_TEMP 'syntex-real-window-selftest'
+          $app = Join-Path $root 'app'
+          New-Item -ItemType Directory -Force -Path $app | Out-Null
+          $child = Join-Path $env:RUNNER_TEMP 'SyntexVisibleChild.cpp'
+          @'
+          #define UNICODE
+          #define _UNICODE
+          #include <windows.h>
+          static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+              if (msg == WM_DESTROY) { PostQuitMessage(0); return 0; }
+              return DefWindowProcW(hwnd, msg, wp, lp);
+          }
+          int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
+              const wchar_t cls[] = L"SyntexHealthcheckVisibleWindow";
+              WNDCLASSW wc{};
+              wc.lpfnWndProc = WndProc;
+              wc.hInstance = instance;
+              wc.lpszClassName = cls;
+              wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+              if (!RegisterClassW(&wc) && GetLastError() != ERROR_CLASS_ALREADY_EXISTS) return 10;
+              HWND hwnd = CreateWindowExW(0, cls, L"Syntex Launcher Healthcheck Selftest", WS_OVERLAPPEDWINDOW,
+                  CW_USEDEFAULT, CW_USEDEFAULT, 640, 360, nullptr, nullptr, instance, nullptr);
+              if (!hwnd) return 11;
+              ShowWindow(hwnd, SW_SHOW);
+              UpdateWindow(hwnd);
+              MSG msg{};
+              while (GetMessageW(&msg, nullptr, 0, 0) > 0) { TranslateMessage(&msg); DispatchMessageW(&msg); }
+              return 0;
+          }
+          '@ | Set-Content -LiteralPath $child -Encoding utf8
+          $cmd = Join-Path $env:RUNNER_TEMP 'build-real-window-selftest.cmd'
+          @(
+            '@echo on',
+            "call `"$env:VSDEVCMD`" -arch=x64 -host_arch=x64",
+            'if errorlevel 1 exit /b %errorlevel%',
+            "cl.exe /nologo /DNOMINMAX /utf-8 /std:c++20 /EHsc /W4 /O1 /Os /GL /MT `"$env:GITHUB_WORKSPACE\rc-src\LauncherHost.cpp`" /Fe:`"$root\SyntexLauncher.exe`" /link /SUBSYSTEM:WINDOWS /MACHINE:X64 /LTCG /OPT:REF /OPT:ICF winhttp.lib bcrypt.lib shell32.lib user32.lib",
+            'if errorlevel 1 exit /b %errorlevel%',
+            "cl.exe /nologo /DNOMINMAX /utf-8 /std:c++20 /EHsc /W4 /O1 /Os /GL /MT `"$child`" /Fe:`"$app\SyntexLauncher.exe`" /link /SUBSYSTEM:WINDOWS /MACHINE:X64 /LTCG /OPT:REF /OPT:ICF user32.lib",
+            'exit /b %errorlevel%'
+          ) | Set-Content -LiteralPath $cmd -Encoding ascii
+          & cmd.exe /d /c $cmd
+          if ($LASTEXITCODE -ne 0) { throw "Native build failed: $LASTEXITCODE" }
+          "ROOT=$root" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Prove visible top-level window is detected by LauncherHost
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $hostExe = Join-Path $env:ROOT 'SyntexLauncher.exe'
+          $p = Start-Process $hostExe -ArgumentList '--ci-gui-self-test' -PassThru
+          if (-not $p.WaitForExit(30000)) {
+            try { $p.Kill($true) } catch {}
+            throw 'LauncherHost did not complete real-window selftest within 30 seconds.'
+          }
+          if ($p.ExitCode -ne 0) {
+            $logRoot = Join-Path $env:ROOT 'storage\logs\launcher-startup'
+            if (Test-Path $logRoot) { Get-ChildItem $logRoot -File | ForEach-Object { Write-Host "--- $($_.FullName) ---"; Get-Content $_.FullName -Raw } }
+            throw "LauncherHost rejected a genuine visible top-level window. ExitCode=$($p.ExitCode)"
+          }
+          $logs = Get-ChildItem (Join-Path $env:ROOT 'storage\logs\launcher-startup') -File -ErrorAction Stop
+          $text = ($logs | ForEach-Object { Get-Content $_.FullName -Raw }) -join "`n"
+          if ($text -notmatch 'Startprüfung erfolgreich: sichtbares Launcher-Fenster erkannt') { throw 'Success log for visible launcher window is missing.' }
+          Write-Host 'REAL_VISIBLE_WINDOW_HEALTHCHECK_PASS'
