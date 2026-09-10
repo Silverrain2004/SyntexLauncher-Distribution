@@ -34,8 +34,10 @@ jobs:
           New-Item -ItemType Directory -Force -Path $work,$candidate,$oldRoot,$dist | Out-Null
           $baseZip = Join-Path $work 'base-0.16.6.zip'
           Invoke-WebRequest -Uri 'https://github.com/Silverrain2004/SyntexLauncher-Distribution/releases/download/v0.16.6/SyntexLauncher-0.16.6-win-x64.zip' -OutFile $baseZip -UseBasicParsing
+          $baseSize = (Get-Item $baseZip).Length
+          if ($baseSize -ne 69903997) { throw "0.16.6 base size mismatch: $baseSize" }
           $hash = (Get-FileHash $baseZip -Algorithm SHA256).Hash.ToLowerInvariant()
-          if ($hash -ne '78870eca0ce18e16010b014d1e5f4a7c7a5a6d633bb94a62327fb3e23db7c743') { throw "0.16.6 base hash mismatch: $hash" }
+          if ($hash -ne 'f34397dae9ca7986ef5d8f9183c6d4ee355126d2c9b913dea6eee561835ada74') { throw "0.16.6 base hash mismatch: $hash" }
           Expand-Archive -LiteralPath $baseZip -DestinationPath $candidate -Force
           Expand-Archive -LiteralPath $baseZip -DestinationPath $oldRoot -Force
           "WORK=$work" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
