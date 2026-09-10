@@ -1,0 +1,150 @@
+name: Syntex 0.16.7 Second Start State Isolation
+
+on:
+  push:
+    branches:
+      - fix/0.16.7-setup-process-shutdown-v2
+    paths:
+      - '.github/workflows/0167-second-start-state-isolation.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  isolate:
+    runs-on: windows-2025
+    timeout-minutes: 15
+    env:
+      BASE_URL: https://github.com/Silverrain2004/SyntexLauncher-Distribution/releases/download/v0.16.6/SyntexLauncher-0.16.6-win-x64.zip
+      BASE_SHA: f34397dae9ca7986ef5d8f9183c6d4ee355126d2c9b913dea6eee561835ada74
+      BASE_SIZE: '69903997'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.400
+
+      - name: Build patched candidate once
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $work=Join-Path $env:RUNNER_TEMP 'second-start-isolation'
+          $zip=Join-Path $work 'base.zip'
+          $candidate=Join-Path $work 'candidate'
+          New-Item -ItemType Directory -Force $work,$candidate|Out-Null
+          Invoke-WebRequest $env:BASE_URL -OutFile $zip -UseBasicParsing
+          if((Get-Item $zip).Length-ne[int64]$env:BASE_SIZE){throw '0.16.6 size changed'}
+          if((Get-FileHash $zip -Algorithm SHA256).Hash.ToLowerInvariant()-ne$env:BASE_SHA){throw '0.16.6 hash changed'}
+          Expand-Archive $zip $candidate -Force
+
+          $patchDir=Join-Path $work 'patcher'
+          New-Item -ItemType Directory -Force $patchDir|Out-Null
+          Copy-Item .\rc-src\PatchManagedStartup.cs (Join-Path $patchDir 'Program.cs')
+          @'
+          <Project Sdk="Microsoft.NET.Sdk">
+            <PropertyGroup><OutputType>Exe</OutputType><TargetFramework>net10.0</TargetFramework><ImplicitUsings>enable</ImplicitUsings><Nullable>enable</Nullable></PropertyGroup>
+            <ItemGroup><PackageReference Include="Mono.Cecil" Version="0.11.6" /></ItemGroup>
+          </Project>
+          '@|Set-Content (Join-Path $patchDir 'Patcher.csproj') -Encoding utf8
+          $o=dotnet run --project (Join-Path $patchDir 'Patcher.csproj') -c Release -- (Join-Path $candidate 'app')
+          $o|Write-Host
+          if($LASTEXITCODE-ne0-or($o-join"`n")-notmatch'PATCH_OK_AVALONIA_DISPATCHER:'){throw 'patch failed'}
+
+          $vswhere=Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+          $vs=&$vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if([string]::IsNullOrWhiteSpace($vs)){throw 'VC++ tools missing'}
+          $dev=Join-Path $vs 'Common7\Tools\VsDevCmd.bat'
+          $cmd=Join-Path $work 'build.cmd'
+          @('@echo on',"call `"$dev`" -arch=x64 -host_arch=x64",'if errorlevel 1 exit /b %errorlevel%',"cl.exe /nologo /DNOMINMAX /utf-8 /std:c++20 /EHsc /W4 /O1 /Os /GL /MT `"$env:GITHUB_WORKSPACE\rc-src\LauncherHost.cpp`" /Fe:`"$candidate\SyntexLauncher.exe`" /link /SUBSYSTEM:WINDOWS /MACHINE:X64 /LTCG /OPT:REF /OPT:ICF winhttp.lib bcrypt.lib shell32.lib user32.lib",'exit /b %errorlevel%')|Set-Content $cmd -Encoding ascii
+          &cmd.exe /d /c $cmd
+          if($LASTEXITCODE-ne0){throw 'host build failed'}
+
+          $same=Join-Path $work 'same-storage'
+          $empty=Join-Path $work 'empty-storage'
+          Copy-Item $candidate $same -Recurse
+          Copy-Item $candidate $empty -Recurse
+          "SAME=$same"|Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          "EMPTY=$empty"|Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          Write-Host 'ISOLATION_CANDIDATES_READY'
+
+      - name: First start and graceful close in both roots
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          function Get-Owned([string]$root){
+            $root=[IO.Path]::GetFullPath($root).TrimEnd('\')
+            $host=Join-Path $root 'SyntexLauncher.exe'; $app=(Join-Path $root 'app')+'\'
+            @(Get-CimInstance Win32_Process|Where-Object{if(-not $_.ExecutablePath){$false}else{try{$p=[IO.Path]::GetFullPath($_.ExecutablePath);($p-ieq$host)-or$p.StartsWith($app,[StringComparison]::OrdinalIgnoreCase)}catch{$false}}})
+          }
+          function First-Cycle([string]$root){
+            $h=Start-Process (Join-Path $root 'SyntexLauncher.exe') -ArgumentList '--post-update-health-check' -WorkingDirectory $root -PassThru
+            if(-not $h.WaitForExit(30000)){try{$h.Kill($true)}catch{};throw "first health timeout: $root"}
+            if($h.ExitCode-ne0){throw "first health failed $($h.ExitCode): $root"}
+            $owned=Get-Owned $root
+            $child=@($owned|Where-Object{$_.ExecutablePath -and [IO.Path]::GetFullPath($_.ExecutablePath).StartsWith(((Join-Path ([IO.Path]::GetFullPath($root).TrimEnd('\')) 'app')+'\'),[StringComparison]::OrdinalIgnoreCase)})
+            if(-not $child){throw "child missing: $root"}
+            foreach($c in $child){$p=Get-Process -Id $c.ProcessId -ErrorAction Stop; [void]$p.CloseMainWindow()}
+            $deadline=(Get-Date).AddSeconds(15)
+            do{Start-Sleep -Milliseconds 100;$left=Get-Owned $root}while($left-and(Get-Date)-lt$deadline)
+            if($left){$left|ForEach-Object{Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue};throw "graceful close failed: $root"}
+          }
+          First-Cycle $env:SAME
+          First-Cycle $env:EMPTY
+          Write-Host 'BOTH_FIRST_CYCLES_GRACEFUL_PASS'
+
+      - name: Snapshot first-start state and clear only storage in one root
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          Write-Host '--- SAME STORAGE AFTER FIRST START ---'
+          Get-ChildItem (Join-Path $env:SAME 'storage') -Recurse -File -ErrorAction SilentlyContinue|ForEach-Object{Write-Host "$($_.FullName.Substring($env:SAME.Length+1)) SIZE=$($_.Length) SHA=$((Get-FileHash $_.FullName -Algorithm SHA256).Hash)"}
+          Write-Host '--- EMPTY ROOT STORAGE BEFORE RESET ---'
+          Get-ChildItem (Join-Path $env:EMPTY 'storage') -Recurse -File -ErrorAction SilentlyContinue|ForEach-Object{Write-Host "$($_.FullName.Substring($env:EMPTY.Length+1)) SIZE=$($_.Length)"}
+          $saved=Join-Path $env:EMPTY 'storage.saved-after-first-start'
+          if(Test-Path (Join-Path $env:EMPTY 'storage')){Move-Item (Join-Path $env:EMPTY 'storage') $saved}
+          New-Item -ItemType Directory -Force (Join-Path $env:EMPTY 'storage')|Out-Null
+          Write-Host 'EMPTY_STORAGE_RESET_PASS'
+
+      - name: Second start with unchanged storage
+        id: same
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $p=Start-Process (Join-Path $env:SAME 'SyntexLauncher.exe') -ArgumentList '--post-update-health-check' -WorkingDirectory $env:SAME -PassThru
+          if(-not $p.WaitForExit(30000)){try{$p.Kill($true)}catch{};throw 'SAME_STORAGE_SECOND_START_TIMEOUT'}
+          if($p.ExitCode-ne0){throw "SAME_STORAGE_SECOND_START_EXIT_$($p.ExitCode)"}
+          Write-Host 'SAME_STORAGE_SECOND_START_PASS'
+
+      - name: Second start with empty storage
+        id: empty
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $p=Start-Process (Join-Path $env:EMPTY 'SyntexLauncher.exe') -ArgumentList '--post-update-health-check' -WorkingDirectory $env:EMPTY -PassThru
+          if(-not $p.WaitForExit(30000)){try{$p.Kill($true)}catch{};throw 'EMPTY_STORAGE_SECOND_START_TIMEOUT'}
+          if($p.ExitCode-ne0){throw "EMPTY_STORAGE_SECOND_START_EXIT_$($p.ExitCode)"}
+          Write-Host 'EMPTY_STORAGE_SECOND_START_PASS'
+
+      - name: Classify result
+        if: always()
+        shell: pwsh
+        run: |
+          Write-Host "SAME_OUTCOME=${{ steps.same.outcome }}"
+          Write-Host "EMPTY_OUTCOME=${{ steps.empty.outcome }}"
+          if('${{ steps.same.outcome }}'-eq'failure'-and'${{ steps.empty.outcome }}'-eq'success'){
+            Write-Host 'SECOND_START_CAUSE_CLASS=PERSISTENT_STORAGE'
+            exit 0
+          }
+          if('${{ steps.same.outcome }}'-eq'failure'-and'${{ steps.empty.outcome }}'-eq'failure'){
+            Write-Host 'SECOND_START_CAUSE_CLASS=NON_STORAGE_OR_GLOBAL_STATE'
+            exit 0
+          }
+          if('${{ steps.same.outcome }}'-eq'success'-and'${{ steps.empty.outcome }}'-eq'success'){
+            Write-Host 'SECOND_START_CAUSE_CLASS=NOT_REPRODUCED'
+            exit 0
+          }
+          Write-Host 'SECOND_START_CAUSE_CLASS=UNEXPECTED_ASYMMETRY'
+          exit 1
