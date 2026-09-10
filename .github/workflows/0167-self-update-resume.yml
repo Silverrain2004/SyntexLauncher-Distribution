@@ -1,5 +1,6 @@
 name: Syntex 0.16.7 Self-Update Resume
 
+# Re-run against the current hardened 0.16.7 UpdateAgent and payload contract.
 on:
   push:
     branches: ['feat/0.16.7-self-update']
