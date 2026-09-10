@@ -61,6 +61,53 @@ jobs:
           if ([string]::IsNullOrWhiteSpace($vs)) { throw 'Visual C++ x64 tools not found.' }
           "VSDEVCMD=$(Join-Path $vs 'Common7\Tools\VsDevCmd.bat')" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
 
+      - name: Prove runner and LauncherHost can detect a genuine visible window
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $probeRoot = Join-Path $env:RUNNER_TEMP 'syntex-window-probe'
+          $probeApp = Join-Path $probeRoot 'app'
+          New-Item -ItemType Directory -Force -Path $probeApp | Out-Null
+          $childSource = Join-Path $env:RUNNER_TEMP 'SyntexVisibleChild.cpp'
+          @'
+          #define UNICODE
+          #define _UNICODE
+          #include <windows.h>
+          static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+              if (msg == WM_DESTROY) { PostQuitMessage(0); return 0; }
+              return DefWindowProcW(hwnd, msg, wp, lp);
+          }
+          int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
+              const wchar_t cls[] = L"SyntexHealthcheckVisibleWindow";
+              WNDCLASSW wc{}; wc.lpfnWndProc = WndProc; wc.hInstance = instance; wc.lpszClassName = cls;
+              if (!RegisterClassW(&wc) && GetLastError() != ERROR_CLASS_ALREADY_EXISTS) return 10;
+              HWND hwnd = CreateWindowExW(0, cls, L"Syntex Launcher Healthcheck Selftest", WS_OVERLAPPEDWINDOW,
+                  CW_USEDEFAULT, CW_USEDEFAULT, 640, 360, nullptr, nullptr, instance, nullptr);
+              if (!hwnd) return 11;
+              ShowWindow(hwnd, SW_SHOW); UpdateWindow(hwnd);
+              MSG msg{}; while (GetMessageW(&msg, nullptr, 0, 0) > 0) { TranslateMessage(&msg); DispatchMessageW(&msg); }
+              return 0;
+          }
+          '@ | Set-Content -LiteralPath $childSource -Encoding utf8
+          $cmd = Join-Path $env:RUNNER_TEMP 'build-window-probe.cmd'
+          @(
+            '@echo on',
+            "call `"$env:VSDEVCMD`" -arch=x64 -host_arch=x64",
+            'if errorlevel 1 exit /b %errorlevel%',
+            "cl.exe /nologo /DNOMINMAX /utf-8 /std:c++20 /EHsc /W4 /O1 /Os /GL /MT `"$env:GITHUB_WORKSPACE\rc-src\LauncherHost.cpp`" /Fe:`"$probeRoot\SyntexLauncher.exe`" /link /SUBSYSTEM:WINDOWS /MACHINE:X64 /LTCG /OPT:REF /OPT:ICF winhttp.lib bcrypt.lib shell32.lib user32.lib",
+            'if errorlevel 1 exit /b %errorlevel%',
+            "cl.exe /nologo /DNOMINMAX /utf-8 /std:c++20 /EHsc /W4 /O1 /Os /GL /MT `"$childSource`" /Fe:`"$probeApp\SyntexLauncher.exe`" /link /SUBSYSTEM:WINDOWS /MACHINE:X64 /LTCG /OPT:REF /OPT:ICF user32.lib",
+            'exit /b %errorlevel%'
+          ) | Set-Content -LiteralPath $cmd -Encoding ascii
+          & cmd.exe /d /c $cmd
+          if ($LASTEXITCODE -ne 0) { throw "Window probe build failed: $LASTEXITCODE" }
+          $probe = Start-Process (Join-Path $probeRoot 'SyntexLauncher.exe') -ArgumentList '--ci-gui-self-test' -PassThru
+          if (-not $probe.WaitForExit(30000)) { try { $probe.Kill($true) } catch {}; throw 'LauncherHost window probe timed out.' }
+          if ($probe.ExitCode -ne 0) { throw "LauncherHost could not detect genuine visible child window. ExitCode=$($probe.ExitCode)" }
+          $probeText = (Get-ChildItem (Join-Path $probeRoot 'storage\logs\launcher-startup') -File | ForEach-Object { Get-Content $_.FullName -Raw }) -join "`n"
+          if ($probeText -notmatch 'Startprüfung erfolgreich: sichtbares Launcher-Fenster erkannt') { throw 'LauncherHost visible-window success log missing.' }
+          Write-Host 'RUNNER_AND_HOST_REAL_WINDOW_DETECTION_PASS'
+
       - name: Build simulated 0.16.6 update host
         shell: pwsh
         run: |
