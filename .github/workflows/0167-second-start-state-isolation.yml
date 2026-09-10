@@ -74,8 +74,8 @@ jobs:
           $ErrorActionPreference='Stop'
           function Get-Owned([string]$root){
             $root=[IO.Path]::GetFullPath($root).TrimEnd('\')
-            $host=Join-Path $root 'SyntexLauncher.exe'; $app=(Join-Path $root 'app')+'\'
-            @(Get-CimInstance Win32_Process|Where-Object{if(-not $_.ExecutablePath){$false}else{try{$p=[IO.Path]::GetFullPath($_.ExecutablePath);($p-ieq$host)-or$p.StartsWith($app,[StringComparison]::OrdinalIgnoreCase)}catch{$false}}})
+            $hostExe=Join-Path $root 'SyntexLauncher.exe'; $app=(Join-Path $root 'app')+'\'
+            @(Get-CimInstance Win32_Process|Where-Object{if(-not $_.ExecutablePath){$false}else{try{$p=[IO.Path]::GetFullPath($_.ExecutablePath);($p-ieq$hostExe)-or$p.StartsWith($app,[StringComparison]::OrdinalIgnoreCase)}catch{$false}}})
           }
           function First-Cycle([string]$root){
             $h=Start-Process (Join-Path $root 'SyntexLauncher.exe') -ArgumentList '--post-update-health-check' -WorkingDirectory $root -PassThru
