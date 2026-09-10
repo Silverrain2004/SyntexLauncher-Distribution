@@ -1,0 +1,174 @@
+name: Publish Syntex 0.16.7 Stable
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/publish-stable-0167.yml'
+      - 'scripts/Assert-NewStableVersion.ps1'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Verify every immutable input without creating a release'
+        required: true
+        default: true
+        type: boolean
+      confirm:
+        description: 'For a real publish enter exactly PUBLISH-0.16.7'
+        required: false
+        default: ''
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: stable-publish-0.16.7
+  cancel-in-progress: false
+
+env:
+  VERSION: '0.16.7'
+  TAG: 'v0.16.7'
+  PAYLOAD_URL: 'https://github.com/Silverrain2004/SyntexLauncher-Distribution/releases/download/v0.16.7-ci-34467708548/SyntexLauncher-0.16.7-ci-win-x64.zip'
+  PAYLOAD_SHA256: 'cc716db79bc5eb8cae80413aa2fe5cce519e05e3c2b12b9e11ae943c1780207f'
+  PAYLOAD_SIZE: '70090490'
+  SETUP_RUN_ID: '34472026462'
+  SETUP_ARTIFACT: 'SyntexSetup-0.16.7-x64-final-v3-current-source'
+  SETUP_SHA256: '3b2bd876de661a8ee73745ede4f1a4ceccb8b4199f88080d62098878fc8b8000'
+  SETUP_SIZE: '394752'
+
+jobs:
+  immutable-publish-contract:
+    name: immutable-publish-contract
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Existing stable must be rejected
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $output = & pwsh -NoProfile -File ./scripts/Assert-NewStableVersion.ps1 -Repository '${{ github.repository }}' -Version '0.16.6' 2>&1 | Out-String
+          $code = $LASTEXITCODE
+          if ($code -eq 0) { throw 'Existing v0.16.6 was not rejected.' }
+          if (-not $output.Contains('IMMUTABLE_STABLE_REJECTED')) { throw "Expected immutable rejection marker missing: $output" }
+          Write-Host 'EXISTING_STABLE_REJECTION_PASS'
+          exit 0
+
+      - name: Synthetic unused version must pass without mutation
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $synthetic = "99.99.${{ github.run_number }}"
+          & ./scripts/Assert-NewStableVersion.ps1 -Repository '${{ github.repository }}' -Version $synthetic
+          if ($LASTEXITCODE -ne 0) { throw 'Unused synthetic version was rejected.' }
+          Write-Host 'UNUSED_STABLE_AVAILABLE_PASS'
+
+      - name: Reject destructive publish primitives in this workflow
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $text = Get-Content '${{ github.workspace }}/.github/workflows/publish-stable-0167.yml' -Raw
+          $forbidden = @('--'+'clobber','release '+'delete','tag '+'-f','push '+'--force','push '+'-f','release '+'upload','delete'+'Release','delete'+'_ref')
+          foreach ($needle in $forbidden) {
+            if ($text.IndexOf($needle, [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+              throw "Forbidden destructive publish primitive present: $needle"
+            }
+          }
+          Write-Host 'NO_DESTRUCTIVE_PUBLISH_PRIMITIVES_PASS'
+
+  verify-and-publish:
+    name: verify-and-publish-0.16.7
+    if: github.event_name == 'workflow_dispatch'
+    needs: immutable-publish-contract
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Enforce main and immutable version availability
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ('${{ github.ref }}' -ne 'refs/heads/main') { throw 'Stable publishing is allowed only from main.' }
+          & ./scripts/Assert-NewStableVersion.ps1 -Repository '${{ github.repository }}' -Version $env:VERSION
+          if ($LASTEXITCODE -ne 0) { throw 'Stable version is not safely available.' }
+
+      - name: Download and verify exact approved payload
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $dist = Join-Path $env:RUNNER_TEMP 'stable-0167'
+          New-Item -ItemType Directory -Force $dist | Out-Null
+          $payload = Join-Path $dist 'SyntexLauncher-0.16.7-win-x64.zip'
+          Invoke-WebRequest $env:PAYLOAD_URL -OutFile $payload -UseBasicParsing
+          if ((Get-Item $payload).Length -ne [int64]$env:PAYLOAD_SIZE) { throw 'Approved payload size mismatch.' }
+          $hash = (Get-FileHash $payload -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($hash -ne $env:PAYLOAD_SHA256) { throw "Approved payload SHA-256 mismatch: $hash" }
+          "DIST=$dist" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          "PAYLOAD_FILE=$payload" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          Write-Host 'APPROVED_PAYLOAD_EXACT_MATCH_PASS'
+
+      - name: Download and verify exact post-merge final Setup artifact
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $setupDir = Join-Path $env:DIST 'setup-artifact'
+          New-Item -ItemType Directory -Force $setupDir | Out-Null
+          gh run download $env:SETUP_RUN_ID --repo '${{ github.repository }}' --name $env:SETUP_ARTIFACT --dir $setupDir
+          if ($LASTEXITCODE -ne 0) { throw 'Could not download the approved post-merge Setup artifact.' }
+          $files = @(Get-ChildItem $setupDir -File -Recurse)
+          if ($files.Count -ne 1) { throw "Expected exactly one Setup artifact file, found $($files.Count)." }
+          $setup = $files[0].FullName
+          if ((Get-Item $setup).Length -ne [int64]$env:SETUP_SIZE) { throw 'Approved Setup size mismatch.' }
+          $hash = (Get-FileHash $setup -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($hash -ne $env:SETUP_SHA256) { throw "Approved Setup SHA-256 mismatch: $hash" }
+          $stableSetup = Join-Path $env:DIST 'SyntexSetup-0.16.7-x64.exe'
+          Copy-Item $setup $stableSetup -Force
+          "SETUP_FILE=$stableSetup" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          Write-Host 'APPROVED_SETUP_EXACT_MATCH_PASS'
+
+      - name: Dry-run gate
+        if: inputs.dry_run
+        shell: pwsh
+        run: |
+          if ('${{ inputs.confirm }}') { Write-Host 'Confirmation text is ignored in dry-run mode.' }
+          Write-Host 'STABLE_0_16_7_DRY_RUN_ALL_INPUTS_VERIFIED'
+
+      - name: Require explicit publish confirmation
+        if: ${{ !inputs.dry_run }}
+        shell: pwsh
+        run: |
+          if ('${{ inputs.confirm }}' -cne 'PUBLISH-0.16.7') {
+            throw 'Real publishing requires the exact confirmation text PUBLISH-0.16.7.'
+          }
+
+      - name: Recheck immutable version immediately before release creation
+        if: ${{ !inputs.dry_run }}
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          & ./scripts/Assert-NewStableVersion.ps1 -Repository '${{ github.repository }}' -Version $env:VERSION
+          if ($LASTEXITCODE -ne 0) { throw 'Stable version became unavailable before publication.' }
+
+      - name: Create new stable release exactly once
+        if: ${{ !inputs.dry_run }}
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          gh release create $env:TAG $env:PAYLOAD_FILE $env:SETUP_FILE --repo '${{ github.repository }}' --target '${{ github.sha }}' --title 'Syntex Launcher 0.16.7' --notes 'Verified Windows x64 stable release. Transactional repair/update, visible-launcher healthcheck, automatic rollback, and preservation of storage/data/instances/runtimes were validated before publication.'
+          if ($LASTEXITCODE -ne 0) { throw 'Stable release creation failed. No overwrite fallback is permitted.' }
+          Write-Host 'STABLE_0_16_7_RELEASE_CREATED_APPEND_ONLY'
