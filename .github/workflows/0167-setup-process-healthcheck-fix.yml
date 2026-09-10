@@ -1,0 +1,209 @@
+name: Syntex 0.16.7 Setup Process and Healthcheck Fix
+
+on:
+  push:
+    branches: ['fix/0.16.7-setup-process-healthcheck']
+    paths:
+      - '.github/workflows/0167-setup-process-healthcheck-fix.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate-fixed-setup:
+    runs-on: windows-latest
+    timeout-minutes: 25
+    env:
+      GOOD_URL: https://github.com/Silverrain2004/SyntexLauncher-Distribution/releases/download/v0.16.7-ci-34467708548/SyntexLauncher-0.16.7-ci-win-x64.zip
+      GOOD_SHA: cc716db79bc5eb8cae80413aa2fe5cce519e05e3c2b12b9e11ae943c1780207f
+      GOOD_SIZE: 70090490
+      BAD_URL: https://github.com/Silverrain2004/SyntexLauncher-Distribution/releases/download/v0.16.7-ci-bad-34467708548/SyntexLauncher-0.16.7-ci-bad-win-x64.zip
+      BAD_SHA: bf0ec4a9cb0dfe23b8299b0c67269a71c01a2e9819c72af2c03ae8cb686a096a
+      BAD_SIZE: 70087569
+      BASE_URL: https://github.com/Silverrain2004/SyntexLauncher-Distribution/releases/download/v0.16.6/SyntexLauncher-0.16.6-win-x64.zip
+      BASE_SHA: f34397dae9ca7986ef5d8f9183c6d4ee355126d2c9b913dea6eee561835ada74
+      BASE_SIZE: 69903997
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Patch Setup source for exact process shutdown and real healthcheck
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $src=Join-Path $env:GITHUB_WORKSPACE 'rc-src\Setup.cpp'
+          $s=Get-Content $src -Raw
+
+          if(-not $s.Contains('#include <windows.h>')){throw 'windows include anchor missing'}
+          $s=$s.Replace('#include <windows.h>', "#include <windows.h>`r`n#include <tlhelp32.h>")
+
+          $anchor='static bool LaunchVerify(const fs::path& root, bool ciMode, std::wstring& error) {'
+          if(-not $s.Contains($anchor)){throw 'LaunchVerify anchor missing'}
+
+          $helper=@'
+static bool IsPathInsideSetup(const fs::path& candidate, const fs::path& directory) {
+    std::error_code ec;
+    const fs::path value = fs::absolute(candidate, ec).lexically_normal();
+    if (ec) return false;
+    ec.clear();
+    fs::path prefix = fs::absolute(directory, ec).lexically_normal();
+    if (ec) return false;
+    auto v = value.wstring();
+    auto p = prefix.wstring();
+    while (!p.empty() && (p.back() == L'\\' || p.back() == L'/')) p.pop_back();
+    p.push_back(L'\\');
+    return v.size() >= p.size() && _wcsnicmp(v.c_str(), p.c_str(), p.size()) == 0;
+}
+
+static void StopLauncherProgramProcesses(const fs::path& root) noexcept {
+    try {
+        std::error_code ec;
+        const fs::path hostPath = fs::absolute(root / L"SyntexLauncher.exe", ec).lexically_normal();
+        if (ec) return;
+        ec.clear();
+        const fs::path appPath = fs::absolute(root / L"app", ec).lexically_normal();
+        if (ec) return;
+
+        HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+        if (snapshot == INVALID_HANDLE_VALUE) return;
+        PROCESSENTRY32W entry{};
+        entry.dwSize = sizeof(entry);
+        if (Process32FirstW(snapshot, &entry)) {
+            do {
+                if (entry.th32ProcessID == 0 || entry.th32ProcessID == GetCurrentProcessId()) continue;
+                HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_TERMINATE | SYNCHRONIZE, FALSE, entry.th32ProcessID);
+                if (!process) continue;
+                std::wstring image(32768, L'\0');
+                DWORD imageLength = static_cast<DWORD>(image.size());
+                bool belongsToLauncher = false;
+                if (QueryFullProcessImageNameW(process, 0, image.data(), &imageLength) && imageLength > 0) {
+                    image.resize(imageLength);
+                    const fs::path processPath = fs::path(image).lexically_normal();
+                    belongsToLauncher = _wcsicmp(processPath.c_str(), hostPath.c_str()) == 0 || IsPathInsideSetup(processPath, appPath);
+                }
+                if (belongsToLauncher) {
+                    TerminateProcess(process, 206);
+                    WaitForSingleObject(process, 5000);
+                }
+                CloseHandle(process);
+            } while (Process32NextW(snapshot, &entry));
+        }
+        CloseHandle(snapshot);
+    } catch (...) {
+    }
+}
+
+'@
+          $s=$s.Replace($anchor,$helper+$anchor)
+
+          $old='const std::wstring command = Quote(host.wstring()) + (ciMode ? L" --ci-gui-self-test" : L"");'
+          $new='const std::wstring command = Quote(host.wstring()) + L" --post-update-health-check";'
+          if(-not $s.Contains($old)){throw 'LaunchVerify command anchor missing'}
+          $s=$s.Replace($old,$new)
+
+          $old2='if (!ValidateWritableRoot(root, error)) { cleanup(); return false; }'
+          $new2=@'
+if (!ValidateWritableRoot(root, error)) { cleanup(); return false; }
+
+    // Setup/repair owns the program files from this point onward. Stop only
+    // Syntex processes that belong to this exact installation root before
+    // backup/replacement, never unrelated processes with the same file name.
+    progress(6, L"Laufender Syntex Launcher wird für Installation/Aktualisierung beendet …");
+    StopLauncherProgramProcesses(root);
+    Sleep(250);
+'@
+          if(-not $s.Contains($old2)){throw 'ValidateWritableRoot anchor missing'}
+          $s=$s.Replace($old2,$new2.TrimEnd())
+
+          $s=$s.Replace('Syntex Launcher Setup 0.16.6 RC1','Syntex Launcher Setup 0.16.7')
+          $s=$s.Replace('Syntex Launcher Setup 0.16.6','Syntex Launcher Setup 0.16.7')
+          $s=$s.Replace('SyntexLauncherSetup/0.16.6-RC1','SyntexLauncherSetup/0.16.7')
+          $s=$s.Replace('DisplayVersion", L"0.16.6"','DisplayVersion", L"0.16.7"')
+          $s=$s.Replace('SyntexLauncher-0166RC-','SyntexLauncher-0167-')
+          $s=$s.Replace('SyntexLauncher-0166RC-stage-','SyntexLauncher-0167-stage-')
+
+          Set-Content $src $s -Encoding utf8
+
+          $check=Get-Content $src -Raw
+          foreach($needle in @('#include <tlhelp32.h>','StopLauncherProgramProcesses(root);','--post-update-health-check','Syntex Launcher Setup 0.16.7')){
+            if(-not $check.Contains($needle)){throw "Patched source missing: $needle"}
+          }
+          if($check.Contains('ciMode ? L" --ci-gui-self-test" : L""')){throw 'Old CI-only LaunchVerify path still present'}
+          Write-Host 'SETUP_PROCESS_AND_REAL_HEALTHCHECK_SOURCE_PATCH_PASS'
+
+      - name: Verify immutable payload inputs and prepare roots
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $work=Join-Path $env:RUNNER_TEMP 'syntex-setup-process-fix';$dist=Join-Path $work 'dist';New-Item -ItemType Directory -Force $work,$dist|Out-Null
+          function Get-Verified($url,$sha,$size,$name){$p=Join-Path $env:RUNNER_TEMP $name;Invoke-WebRequest $url -OutFile $p -UseBasicParsing;if((Get-Item $p).Length -ne [int64]$size){throw "$name size mismatch"};if((Get-FileHash $p -Algorithm SHA256).Hash.ToLowerInvariant() -ne $sha){throw "$name hash mismatch"};$p}
+          $base=Get-Verified $env:BASE_URL $env:BASE_SHA $env:BASE_SIZE 'base-process-fix.zip';$good=Get-Verified $env:GOOD_URL $env:GOOD_SHA $env:GOOD_SIZE 'good-process-fix.zip';$null=Get-Verified $env:BAD_URL $env:BAD_SHA $env:BAD_SIZE 'bad-process-fix.zip'
+          "WORK=$work"|Out-File $env:GITHUB_ENV -Encoding utf8 -Append;"DIST=$dist"|Out-File $env:GITHUB_ENV -Encoding utf8 -Append;"BASE_ZIP=$base"|Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Build fixed good and rollback-test x64 setups
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $src=Join-Path $env:GITHUB_WORKSPACE 'rc-src\Setup.cpp'
+          $vswhere=Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe';$vs=&$vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath;if([string]::IsNullOrWhiteSpace($vs)){throw 'VC++ x64 missing'};$dev=Join-Path $vs 'Common7\Tools\VsDevCmd.bat'
+          function Build-Setup($url,$sha,$size,$out,$suffix){@('#pragma once',("static constexpr wchar_t PAYLOAD_URL[] = L`"{0}`";" -f $url),("static constexpr wchar_t PAYLOAD_SHA256[] = L`"{0}`";" -f $sha),("static constexpr unsigned long long PAYLOAD_SIZE = {0}ULL;" -f $size))|Set-Content .\rc-src\PayloadContract.h -Encoding utf8;$cmd=Join-Path $env:RUNNER_TEMP "build-process-fix-$suffix.cmd";@('@echo on',"call `"$dev`" -arch=x64 -host_arch=x64",'if errorlevel 1 exit /b %errorlevel%',"cl.exe /nologo /DNOMINMAX /utf-8 /std:c++20 /EHsc /W4 /O2 /MT /I`"$env:GITHUB_WORKSPACE\rc-src`" `"$src`" /Fe:`"$out`" /link /SUBSYSTEM:WINDOWS /MACHINE:X64 winhttp.lib bcrypt.lib shell32.lib ole32.lib user32.lib gdi32.lib advapi32.lib comctl32.lib uxtheme.lib",'exit /b %errorlevel%')|Set-Content $cmd -Encoding ascii;&cmd.exe /d /c $cmd;if($LASTEXITCODE -ne 0){throw "Setup $suffix build failed"}}
+          $good=Join-Path $env:DIST 'SyntexSetup-0.16.7-x64-PROCESS-FIX.exe';$bad=Join-Path $env:DIST 'SyntexSetup-0.16.7-x64-PROCESS-FIX-rollback-test.exe';Build-Setup $env:GOOD_URL $env:GOOD_SHA $env:GOOD_SIZE $good 'good';Build-Setup $env:BAD_URL $env:BAD_SHA $env:BAD_SIZE $bad 'bad'
+          "FINAL_SETUP=$good"|Out-File $env:GITHUB_ENV -Encoding utf8 -Append;"BAD_SETUP=$bad"|Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Verify setup selftests and x64
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          foreach($arg in @('--self-test','--repair-self-test','--log-self-test')){$p=Start-Process $env:FINAL_SETUP -ArgumentList $arg -PassThru -Wait;if($p.ExitCode -ne 0){throw "$arg failed: $($p.ExitCode)"}}
+          $b=[IO.File]::ReadAllBytes($env:FINAL_SETUP);if($b[0]-ne 0x4d -or $b[1]-ne 0x5a){throw 'Setup MZ missing'};$lf=[BitConverter]::ToInt32($b,0x3c);$machine=[BitConverter]::ToUInt16($b,$lf+4);if($machine-ne 0x8664){throw "Setup not AMD64: 0x$('{0:X4}' -f $machine)"}
+          Write-Host 'SETUP_PROCESS_FIX_SELFTEST_X64_PASS'
+
+      - name: Real repair terminates existing launcher and uses real healthcheck
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $root=Join-Path $env:WORK 'running-root';Expand-Archive $env:BASE_ZIP $root -Force
+          foreach($d in @('storage','data','instances','runtimes')){New-Item -ItemType Directory -Force (Join-Path $root $d)|Out-Null;"KEEP-$d"|Set-Content (Join-Path $root "$d\keep.txt") -Encoding ascii}
+
+          $old=Start-Process (Join-Path $root 'SyntexLauncher.exe') -WorkingDirectory $root -PassThru
+          Start-Sleep -Seconds 3
+          if($old.HasExited){throw "Pre-existing launcher exited before setup; exit $($old.ExitCode)"}
+          $oldPid=$old.Id
+          Write-Host "Pre-existing launcher PID: $oldPid"
+
+          $setup=Start-Process $env:FINAL_SETUP -ArgumentList @('--ci-install',"`"$root`"") -PassThru -Wait
+          if($setup.ExitCode -ne 0){
+            $logs=Join-Path $env:DIST 'SyntexSetup-Log';if(Test-Path $logs){Get-ChildItem $logs -File|ForEach-Object{Write-Host "--- $($_.FullName) ---";Get-Content $_.FullName -Raw}}
+            $startup=Join-Path $root 'storage\logs\launcher-startup';if(Test-Path $startup){Get-ChildItem $startup -File|ForEach-Object{Write-Host "--- $($_.FullName) ---";Get-Content $_.FullName -Raw}}
+            throw "Fixed Setup exit $($setup.ExitCode)"
+          }
+          Start-Sleep -Milliseconds 500
+          if(Get-Process -Id $oldPid -ErrorAction SilentlyContinue){throw 'Pre-existing launcher PID survived setup process shutdown'}
+          foreach($d in @('storage','data','instances','runtimes')){if((Get-Content (Join-Path $root "$d\keep.txt") -Raw).Trim() -ne "KEEP-$d"){throw "Setup changed $d"}}
+          $startup=Join-Path $root 'storage\logs\launcher-startup';if(-not(Test-Path $startup)){throw 'No launcher startup log'}
+          $latest=Get-ChildItem $startup -File|Sort-Object LastWriteTimeUtc -Descending|Select-Object -First 1;$text=Get-Content $latest.FullName -Raw;Write-Host $text
+          if(-not $text.Contains('Startprüfung erfolgreich: sichtbares Launcher-Fenster erkannt.')){throw 'Real post-update healthcheck did not confirm visible launcher window'}
+          Get-Process SyntexLauncher -ErrorAction SilentlyContinue|Stop-Process -Force -ErrorAction SilentlyContinue
+          Write-Host 'SETUP_TERMINATES_EXISTING_AND_REAL_HEALTHCHECK_PASS'
+
+      - name: Real failed repair still rolls back and preserves data
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $root=Join-Path $env:WORK 'rollback-root';Expand-Archive $env:BASE_ZIP $root -Force;foreach($d in @('storage','data','instances','runtimes')){New-Item -ItemType Directory -Force (Join-Path $root $d)|Out-Null;"KEEP-$d"|Set-Content (Join-Path $root "$d\keep.txt") -Encoding ascii};$oldHash=(Get-FileHash (Join-Path $root 'SyntexLauncher.exe') -Algorithm SHA256).Hash
+          $p=Start-Process $env:BAD_SETUP -ArgumentList @('--ci-install',"`"$root`"") -PassThru -Wait;if($p.ExitCode -eq 0){throw 'Bad Setup unexpectedly succeeded'}
+          if((Get-FileHash (Join-Path $root 'SyntexLauncher.exe') -Algorithm SHA256).Hash -ne $oldHash){throw 'Rollback host mismatch'}
+          foreach($d in @('storage','data','instances','runtimes')){if((Get-Content (Join-Path $root "$d\keep.txt") -Raw).Trim() -ne "KEEP-$d"){throw "Rollback changed $d"}}
+          Get-Process SyntexLauncher -ErrorAction SilentlyContinue|Stop-Process -Force -ErrorAction SilentlyContinue
+          Write-Host 'SETUP_PROCESS_FIX_ROLLBACK_DATA_PASS'
+
+      - name: Upload fixed setup and patched source
+        uses: actions/upload-artifact@v4
+        with:
+          name: SyntexSetup-0.16.7-x64-process-healthcheck-fix
+          path: |
+            ${{ env.FINAL_SETUP }}
+            rc-src/Setup.cpp
+          if-no-files-found: error
+          retention-days: 7
