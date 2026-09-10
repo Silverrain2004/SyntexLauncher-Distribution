@@ -81,8 +81,8 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference='Stop'
-          $host=Join-Path $env:ROOT 'SyntexLauncher.exe'
-          $p=Start-Process $host -ArgumentList '--ci-gui-self-test' -PassThru
+          $launcherExe=Join-Path $env:ROOT 'SyntexLauncher.exe'
+          $p=Start-Process $launcherExe -ArgumentList '--ci-gui-self-test' -PassThru
           if(-not $p.WaitForExit(45000)){
             try{$p.Kill($true)}catch{}
             Get-Process SyntexLauncher -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
