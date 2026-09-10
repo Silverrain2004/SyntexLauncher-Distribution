@@ -46,10 +46,31 @@ inline bool IsPreservedUserEntry(const fs::path& path) {
     return name.rfind(L".syntex-repair-backup", 0) == 0;
 }
 
+inline bool RemovePackagedPersistentEntries(const fs::path& stage, std::wstring& error) {
+    std::error_code ec;
+    std::vector<fs::path> remove;
+    for (const auto& entry : fs::directory_iterator(stage, ec)) {
+        if (ec) {
+            error = L"Temporäre Installation konnte beim Schutz persönlicher Daten nicht gelesen werden.";
+            return false;
+        }
+        if (IsPreservedUserEntry(entry.path())) remove.push_back(entry.path());
+    }
+    for (const auto& path : remove) {
+        fs::remove_all(path, ec);
+        if (ec) {
+            error = L"Ein persistenter Benutzerordner konnte nicht aus dem temporären Programmpaket entfernt werden: " + path.filename().wstring();
+            return false;
+        }
+    }
+    return true;
+}
+
 inline void CollectStageEntryNames(const fs::path& stage, Transaction& transaction, std::error_code& ec) {
     transaction.newEntryNames.clear();
     for (const auto& entry : fs::directory_iterator(stage, ec)) {
         if (ec) return;
+        if (IsPreservedUserEntry(entry.path())) continue;
         transaction.newEntryNames.push_back(entry.path().filename());
     }
 }
@@ -88,6 +109,13 @@ inline bool RestoreMovedEntries(const fs::path& root, Transaction& transaction, 
 inline bool Begin(const fs::path& root, const fs::path& stage, Transaction& transaction, std::wstring& error) {
     std::error_code ec;
     transaction = {};
+
+    // A release archive may accidentally contain persistent roots (for example storage/logs
+    // created during packaging). They are never program payload. Remove them from the isolated
+    // staging tree before the copy set is calculated so install, repair and rollback can neither
+    // overwrite nor delete real user/creator state.
+    if (!RemovePackagedPersistentEntries(stage, error)) return false;
+
     CollectStageEntryNames(stage, transaction, ec);
     if (ec || transaction.newEntryNames.empty()) {
         error = L"Temporäre Installation konnte für die Reparaturtransaktion nicht gelesen werden.";
@@ -144,6 +172,7 @@ inline bool Rollback(const fs::path& root, Transaction& transaction, std::wstrin
 
     std::error_code ec;
     for (const auto& name : transaction.newEntryNames) {
+        if (IsPreservedUserEntry(name)) continue;
         fs::remove_all(root / name, ec);
         if (ec) {
             error = L"Rollback konnte neue Programmdateien nicht entfernen: " + name.wstring();
@@ -185,7 +214,8 @@ inline bool RunFilesystemSelfTest() {
     std::error_code ec;
     const auto unique = std::to_wstring(std::chrono::steady_clock::now().time_since_epoch().count());
     const fs::path base = fs::temp_directory_path() / (L"SyntexRepairTransactionTest-" + unique);
-    const fs::path stage = base / L"stage";
+    const fs::path successStage = base / L"stage-success";
+    const fs::path rollbackStage = base / L"stage-rollback";
     const fs::path successRoot = base / L"success";
     const fs::path rollbackRoot = base / L"rollback";
     fs::remove_all(base, ec);
@@ -207,17 +237,29 @@ inline bool RunFilesystemSelfTest() {
         std::ofstream(root / L"screenshots" / L"legacy.png") << "keep-legacy";
     };
 
-    fs::create_directories(stage / L"app", ec);
-    if (ec) return false;
-    std::ofstream(stage / L"SyntexLauncher.exe") << "new-launcher";
-    std::ofstream(stage / L"app" / L"SyntexLauncher.App.exe") << "new-app";
-    std::ofstream(stage / L"app" / L"SyntexUninstall.exe") << "new-uninstaller";
+    auto seedStage = [&](const fs::path& stage) {
+        fs::create_directories(stage / L"app", ec);
+        fs::create_directories(stage / L"storage" / L"data" / L"settings", ec);
+        fs::create_directories(stage / L"data", ec);
+        fs::create_directories(stage / L"instances", ec);
+        fs::create_directories(stage / L"runtimes", ec);
+        if (ec) return;
+        std::ofstream(stage / L"SyntexLauncher.exe") << "new-launcher";
+        std::ofstream(stage / L"app" / L"SyntexLauncher.App.exe") << "new-app";
+        std::ofstream(stage / L"app" / L"SyntexUninstall.exe") << "new-uninstaller";
+        std::ofstream(stage / L"storage" / L"data" / L"settings" / L"settings.json") << "packaged-storage-must-never-install";
+        std::ofstream(stage / L"data" / L"packaged.txt") << "must-never-install";
+        std::ofstream(stage / L"instances" / L"packaged.txt") << "must-never-install";
+        std::ofstream(stage / L"runtimes" / L"packaged.txt") << "must-never-install";
+    };
 
+    seedStage(successStage);
     seedRoot(successRoot);
     Transaction success;
     std::wstring error;
-    if (!Begin(successRoot, stage, success, error) || !success.repair) { fs::remove_all(base, ec); return false; }
-    for (const auto& entry : fs::directory_iterator(stage, ec)) {
+    if (!Begin(successRoot, successStage, success, error) || !success.repair) { fs::remove_all(base, ec); return false; }
+    if (fs::exists(successStage / L"storage") || fs::exists(successStage / L"data") || fs::exists(successStage / L"instances") || fs::exists(successStage / L"runtimes")) { fs::remove_all(base, ec); return false; }
+    for (const auto& entry : fs::directory_iterator(successStage, ec)) {
         if (ec) { fs::remove_all(base, ec); return false; }
         fs::copy(entry.path(), successRoot / entry.path().filename(), fs::copy_options::recursive | fs::copy_options::overwrite_existing, ec);
         if (ec) { fs::remove_all(base, ec); return false; }
@@ -229,16 +271,22 @@ inline bool RunFilesystemSelfTest() {
         !fs::exists(successRoot / L"Old.Managed.dll") &&
         !fs::exists(successRoot / L"tools") &&
         ReadSmallTextFile(successRoot / L"storage" / L"data" / L"settings" / L"settings.json") == "keep-storage" &&
+        !fs::exists(successRoot / L"storage" / L"packaged.txt") &&
         ReadSmallTextFile(successRoot / L"data" / L"settings" / L"settings.json") == "keep-data" &&
+        !fs::exists(successRoot / L"data" / L"packaged.txt") &&
         ReadSmallTextFile(successRoot / L"instances" / L"world-a" / L"level.dat") == "keep-instance" &&
+        !fs::exists(successRoot / L"instances" / L"packaged.txt") &&
         ReadSmallTextFile(successRoot / L"runtimes" / L"java-21" / L"release") == "keep-runtime" &&
+        !fs::exists(successRoot / L"runtimes" / L"packaged.txt") &&
         ReadSmallTextFile(successRoot / L"screenshots" / L"legacy.png") == "keep-legacy";
 
+    seedStage(rollbackStage);
     seedRoot(rollbackRoot);
     Transaction rollback;
     error.clear();
-    if (!Begin(rollbackRoot, stage, rollback, error) || !rollback.repair) { fs::remove_all(base, ec); return false; }
-    for (const auto& entry : fs::directory_iterator(stage, ec)) {
+    if (!Begin(rollbackRoot, rollbackStage, rollback, error) || !rollback.repair) { fs::remove_all(base, ec); return false; }
+    if (fs::exists(rollbackStage / L"storage") || fs::exists(rollbackStage / L"data") || fs::exists(rollbackStage / L"instances") || fs::exists(rollbackStage / L"runtimes")) { fs::remove_all(base, ec); return false; }
+    for (const auto& entry : fs::directory_iterator(rollbackStage, ec)) {
         if (ec) { fs::remove_all(base, ec); return false; }
         fs::copy(entry.path(), rollbackRoot / entry.path().filename(), fs::copy_options::recursive | fs::copy_options::overwrite_existing, ec);
         if (ec) { fs::remove_all(base, ec); return false; }
