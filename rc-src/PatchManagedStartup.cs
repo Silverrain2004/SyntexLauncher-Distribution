@@ -94,10 +94,10 @@ deferredIl.Append(deferredIl.Create(OpCodes.Call, clone));
 deferredIl.Append(deferredIl.Create(OpCodes.Pop));
 deferredIl.Append(deferredIl.Create(OpCodes.Ret));
 
-// Do NOT depend on SynchronizationContext.Current here. During Avalonia startup it can be null,
-// and the old synchronous fallback recreated the original startup deadlock/race. Instead, always
-// post onto Avalonia's UI dispatcher. The caller receives Task.CompletedTask synchronously, assigns
-// desktop.MainWindow and completes OnFrameworkInitializationCompleted before this callback runs.
+// Do NOT depend on SynchronizationContext.Current here. During Avalonia startup it can be null.
+// Always post onto Avalonia's UI dispatcher and, when the API exposes the priority parameter,
+// explicitly use DispatcherPriority.Background. This lets the MainWindow/layout/render work run
+// before potentially long initialization work, independent of whether persistent state already exists.
 var directory = Path.GetDirectoryName(path) ?? throw new InvalidOperationException("assembly directory missing");
 var avaloniaBasePath = Path.Combine(directory, "Avalonia.Base.dll");
 if (!File.Exists(avaloniaBasePath))
@@ -113,33 +113,30 @@ var post = postCandidates.FirstOrDefault(m => m.Parameters.Count == 1)
     ?? postCandidates.FirstOrDefault(m => m.Parameters.Count == 2 && m.Parameters[1].ParameterType.FullName == "Avalonia.Threading.DispatcherPriority")
     ?? throw new MissingMethodException("Avalonia.Threading.Dispatcher.Post(Action[, DispatcherPriority]) not found");
 
+FieldDefinition? backgroundPriority = null;
+if (post.Parameters.Count == 2)
+{
+    var priorityType = avalonia.MainModule.Types.Single(t => t.FullName == "Avalonia.Threading.DispatcherPriority");
+    backgroundPriority = priorityType.Fields.SingleOrDefault(f => f.Name == "Background" && f.IsStatic)
+        ?? throw new MissingFieldException("Avalonia.Threading.DispatcherPriority.Background not found");
+}
+
 var actionCtor = typeof(Action).GetConstructor(new[] { typeof(object), typeof(IntPtr) })
     ?? throw new MissingMethodException("System.Action delegate constructor missing");
 var completed = typeof(Task).GetProperty(nameof(Task.CompletedTask), BindingFlags.Public | BindingFlags.Static)!.GetMethod!;
 
 original.Body = new Mono.Cecil.Cil.MethodBody(original)
 {
-    InitLocals = post.Parameters.Count == 2,
+    InitLocals = false,
     MaxStackSize = 4
 };
 var il = original.Body.GetILProcessor();
-VariableDefinition? priorityLocal = null;
-if (post.Parameters.Count == 2)
-{
-    priorityLocal = new VariableDefinition(module.ImportReference(post.Parameters[1].ParameterType));
-    original.Body.Variables.Add(priorityLocal);
-}
-
 il.Append(il.Create(OpCodes.Call, module.ImportReference(getUiThread)));
 il.Append(il.Create(OpCodes.Ldarg_0));
 il.Append(il.Create(OpCodes.Ldftn, deferred));
 il.Append(il.Create(OpCodes.Newobj, module.ImportReference(actionCtor)));
-if (priorityLocal is not null)
-{
-    il.Append(il.Create(OpCodes.Ldloca, priorityLocal));
-    il.Append(il.Create(OpCodes.Initobj, module.ImportReference(post.Parameters[1].ParameterType)));
-    il.Append(il.Create(OpCodes.Ldloc, priorityLocal));
-}
+if (backgroundPriority is not null)
+    il.Append(il.Create(OpCodes.Ldsfld, module.ImportReference(backgroundPriority)));
 il.Append(il.Create(OpCodes.Callvirt, module.ImportReference(post)));
 il.Append(il.Create(OpCodes.Call, module.ImportReference(completed)));
 il.Append(il.Create(OpCodes.Ret));
@@ -148,4 +145,4 @@ var temporary = path + ".patched";
 asm.Write(temporary);
 File.Copy(temporary, path, true);
 File.Delete(temporary);
-Console.WriteLine($"PATCH_OK_AVALONIA_DISPATCHER:{Path.GetFileName(path)}:POST_PARAMS={post.Parameters.Count}");
+Console.WriteLine($"PATCH_OK_AVALONIA_BACKGROUND:{Path.GetFileName(path)}:POST_PARAMS={post.Parameters.Count}");
