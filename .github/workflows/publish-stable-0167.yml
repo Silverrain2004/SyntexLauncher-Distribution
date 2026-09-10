@@ -55,6 +55,7 @@ jobs:
           if ($code -eq 0) { throw 'Existing v0.16.6 was not rejected.' }
           if (-not $output.Contains('IMMUTABLE_STABLE_REJECTED')) { throw "Expected immutable rejection marker missing: $output" }
           Write-Host 'EXISTING_STABLE_REJECTION_PASS'
+          exit 0
 
       - name: Synthetic unused version must pass without mutation
         shell: pwsh
