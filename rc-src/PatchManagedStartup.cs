@@ -1,7 +1,6 @@
 using Mono.Cecil;
 using Mono.Cecil.Cil;
 using System.Reflection;
-using System.Threading;
 using System.Threading.Tasks;
 
 if (args.Length != 1)
@@ -31,7 +30,7 @@ var original = type.Methods.Single(m => m.Name == "InitializeAsync" && !m.HasPar
 if (type.Methods.Any(m => m.Name == "InitializeAsyncDeferredCore" || m.Name == "RunInitializeAsyncDeferred"))
     throw new InvalidOperationException("already patched");
 
-// Keep the compiler-generated InitializeAsync state-machine wrapper intact in a private clone.
+// Preserve the compiler-generated InitializeAsync wrapper exactly in a private clone.
 var clone = new MethodDefinition(
     "InitializeAsyncDeferredCore",
     Mono.Cecil.MethodAttributes.Private | Mono.Cecil.MethodAttributes.HideBySig,
@@ -83,14 +82,11 @@ foreach (var handler in original.Body.ExceptionHandlers)
     });
 }
 
-// This callback is posted to the current UI SynchronizationContext. Posting is the key:
-// the original App await receives an already-completed task, creates/assigns MainWindow and
-// returns to Avalonia before the original initialization body begins executing.
+// Queue the real initialization as a parameterless callback.
 var deferred = new MethodDefinition(
     "RunInitializeAsyncDeferred",
     Mono.Cecil.MethodAttributes.Private | Mono.Cecil.MethodAttributes.HideBySig,
     module.TypeSystem.Void);
-deferred.Parameters.Add(new ParameterDefinition("state", Mono.Cecil.ParameterAttributes.None, module.TypeSystem.Object));
 type.Methods.Add(deferred);
 var deferredIl = deferred.Body.GetILProcessor();
 deferredIl.Append(deferredIl.Create(OpCodes.Ldarg_0));
@@ -98,46 +94,58 @@ deferredIl.Append(deferredIl.Create(OpCodes.Call, clone));
 deferredIl.Append(deferredIl.Create(OpCodes.Pop));
 deferredIl.Append(deferredIl.Create(OpCodes.Ret));
 
-var syncContextType = typeof(SynchronizationContext);
-var getCurrent = syncContextType.GetProperty(nameof(SynchronizationContext.Current), BindingFlags.Public | BindingFlags.Static)!.GetMethod!;
-var post = syncContextType.GetMethod(nameof(SynchronizationContext.Post), new[] { typeof(SendOrPostCallback), typeof(object) })!;
-var callbackCtor = typeof(SendOrPostCallback).GetConstructor(new[] { typeof(object), typeof(IntPtr) })!;
+// Do NOT depend on SynchronizationContext.Current here. During Avalonia startup it can be null,
+// and the old synchronous fallback recreated the original startup deadlock/race. Instead, always
+// post onto Avalonia's UI dispatcher. The caller receives Task.CompletedTask synchronously, assigns
+// desktop.MainWindow and completes OnFrameworkInitializationCompleted before this callback runs.
+var directory = Path.GetDirectoryName(path) ?? throw new InvalidOperationException("assembly directory missing");
+var avaloniaBasePath = Path.Combine(directory, "Avalonia.Base.dll");
+if (!File.Exists(avaloniaBasePath))
+    throw new FileNotFoundException("Avalonia.Base.dll not found next to launcher assembly", avaloniaBasePath);
+
+using var avalonia = AssemblyDefinition.ReadAssembly(avaloniaBasePath, new ReaderParameters { InMemory = true });
+var dispatcherType = avalonia.MainModule.Types.Single(t => t.FullName == "Avalonia.Threading.Dispatcher");
+var getUiThread = dispatcherType.Methods.Single(m => m.Name == "get_UIThread" && m.IsStatic && m.Parameters.Count == 0);
+var postCandidates = dispatcherType.Methods
+    .Where(m => m.Name == "Post" && !m.IsStatic && m.Parameters.Count >= 1 && m.Parameters[0].ParameterType.FullName == "System.Action")
+    .ToList();
+var post = postCandidates.FirstOrDefault(m => m.Parameters.Count == 1)
+    ?? postCandidates.FirstOrDefault(m => m.Parameters.Count == 2 && m.Parameters[1].ParameterType.FullName == "Avalonia.Threading.DispatcherPriority")
+    ?? throw new MissingMethodException("Avalonia.Threading.Dispatcher.Post(Action[, DispatcherPriority]) not found");
+
+var actionCtor = typeof(Action).GetConstructor(new[] { typeof(object), typeof(IntPtr) })
+    ?? throw new MissingMethodException("System.Action delegate constructor missing");
 var completed = typeof(Task).GetProperty(nameof(Task.CompletedTask), BindingFlags.Public | BindingFlags.Static)!.GetMethod!;
 
 original.Body = new Mono.Cecil.Cil.MethodBody(original)
 {
-    InitLocals = true,
+    InitLocals = post.Parameters.Count == 2,
     MaxStackSize = 4
 };
-var contextVariable = new VariableDefinition(module.ImportReference(syncContextType));
-original.Body.Variables.Add(contextVariable);
 var il = original.Body.GetILProcessor();
+VariableDefinition? priorityLocal = null;
+if (post.Parameters.Count == 2)
+{
+    priorityLocal = new VariableDefinition(module.ImportReference(post.Parameters[1].ParameterType));
+    original.Body.Variables.Add(priorityLocal);
+}
 
-var fallback = il.Create(OpCodes.Ldarg_0);
-var completedCall = il.Create(OpCodes.Call, module.ImportReference(completed));
-
-il.Append(il.Create(OpCodes.Call, module.ImportReference(getCurrent)));
-il.Append(il.Create(OpCodes.Stloc, contextVariable));
-il.Append(il.Create(OpCodes.Ldloc, contextVariable));
-il.Append(il.Create(OpCodes.Brfalse, fallback));
-il.Append(il.Create(OpCodes.Ldloc, contextVariable));
+il.Append(il.Create(OpCodes.Call, module.ImportReference(getUiThread)));
 il.Append(il.Create(OpCodes.Ldarg_0));
 il.Append(il.Create(OpCodes.Ldftn, deferred));
-il.Append(il.Create(OpCodes.Newobj, module.ImportReference(callbackCtor)));
-il.Append(il.Create(OpCodes.Ldnull));
+il.Append(il.Create(OpCodes.Newobj, module.ImportReference(actionCtor)));
+if (priorityLocal is not null)
+{
+    il.Append(il.Create(OpCodes.Ldloca, priorityLocal));
+    il.Append(il.Create(OpCodes.Initobj, module.ImportReference(post.Parameters[1].ParameterType)));
+    il.Append(il.Create(OpCodes.Ldloc, priorityLocal));
+}
 il.Append(il.Create(OpCodes.Callvirt, module.ImportReference(post)));
-il.Append(il.Create(OpCodes.Br, completedCall));
-
-// Avalonia normally supplies a UI SynchronizationContext here. This fallback preserves
-// compatibility if a non-standard host invokes the view model without one.
-il.Append(fallback);
-il.Append(il.Create(OpCodes.Call, clone));
-il.Append(il.Create(OpCodes.Pop));
-il.Append(completedCall);
+il.Append(il.Create(OpCodes.Call, module.ImportReference(completed)));
 il.Append(il.Create(OpCodes.Ret));
 
 var temporary = path + ".patched";
 asm.Write(temporary);
 File.Copy(temporary, path, true);
 File.Delete(temporary);
-Console.WriteLine($"PATCH_OK_DEFERRED_UI:{Path.GetFileName(path)}");
+Console.WriteLine($"PATCH_OK_AVALONIA_DISPATCHER:{Path.GetFileName(path)}:POST_PARAMS={post.Parameters.Count}");
