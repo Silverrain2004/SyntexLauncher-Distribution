@@ -26,10 +26,15 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $output = & ./scripts/Assert-NewStableVersion.ps1 -Repository '${{ github.repository }}' -Version '0.16.6' 2>&1 | Out-String
-          $code = $LASTEXITCODE
+          $stdout = Join-Path $env:RUNNER_TEMP 'immutable-existing.stdout.txt'
+          $stderr = Join-Path $env:RUNNER_TEMP 'immutable-existing.stderr.txt'
+          $p = Start-Process pwsh -ArgumentList @(
+            '-NoProfile', '-File', './scripts/Assert-NewStableVersion.ps1',
+            '-Repository', '${{ github.repository }}', '-Version', '0.16.6'
+          ) -RedirectStandardOutput $stdout -RedirectStandardError $stderr -PassThru -Wait
+          $output = ((Get-Content $stdout -Raw -ErrorAction SilentlyContinue) + "`n" + (Get-Content $stderr -Raw -ErrorAction SilentlyContinue))
           Write-Host $output
-          if ($code -eq 0) { throw 'Immutability guard incorrectly allowed existing Stable v0.16.6.' }
+          if ($p.ExitCode -eq 0) { throw 'Immutability guard incorrectly allowed existing Stable v0.16.6.' }
           if ($output -notmatch 'IMMUTABLE_STABLE_REJECTED') { throw 'Existing Stable rejection was not fail-closed for the expected reason.' }
           Write-Host 'IMMUTABLE_EXISTING_STABLE_REJECTION_PASS'
 
