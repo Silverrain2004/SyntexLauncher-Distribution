@@ -1,0 +1,111 @@
+name: Validate 0.16.6 Stale Manifest Blocker
+
+on:
+  push:
+    branches: ['feat/0.16.7-self-update']
+    paths:
+      - '.github/workflows/validate-0166-stale-manifest.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify-stale-manifest-blocker:
+    runs-on: windows-latest
+    timeout-minutes: 8
+    steps:
+      - name: Verify exact public assets and stale manifest state
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $payloadUrl = 'https://github.com/Silverrain2004/SyntexLauncher-Distribution/releases/download/v0.16.6/SyntexLauncher-0.16.6-win-x64.zip'
+          $setupUrl = 'https://github.com/Silverrain2004/SyntexLauncher-Distribution/releases/download/v0.16.6/SyntexLauncherSetup-0.16.6-win-x64.exe'
+          $manifestUrl = 'https://raw.githubusercontent.com/Silverrain2004/SyntexLauncher-Distribution/main/distribution.json'
+          $payload = Join-Path $env:RUNNER_TEMP 'SyntexLauncher-0.16.6-win-x64.zip'
+          $setup = Join-Path $env:RUNNER_TEMP 'SyntexLauncherSetup-0.16.6-win-x64.exe'
+          Invoke-WebRequest -Uri $payloadUrl -OutFile $payload -UseBasicParsing
+          Invoke-WebRequest -Uri $setupUrl -OutFile $setup -UseBasicParsing
+          $manifest = Invoke-RestMethod -Uri $manifestUrl
+          $payloadHash = (Get-FileHash $payload -Algorithm SHA256).Hash.ToLowerInvariant()
+          $setupHash = (Get-FileHash $setup -Algorithm SHA256).Hash.ToLowerInvariant()
+          $payloadSize = (Get-Item $payload).Length
+          if ($payloadHash -ne 'f34397dae9ca7986ef5d8f9183c6d4ee355126d2c9b913dea6eee561835ada74' -or $payloadSize -ne 69903997) { throw 'Public payload changed; do not repair the manifest.' }
+          if ($setupHash -ne '7d785b1b4205ccb9bc59ab630bebd93a9853ba8f4bbf491f8315091e12241c17' -or (Get-Item $setup).Length -ne 331776) { throw 'Public setup changed; do not repair the manifest.' }
+          if ($manifest.payload.sha256 -ne '78870eca0ce18e16010b014d1e5f4a7c7a5a6d633bb94a62327fb3e23db7c743' -or [int64]$manifest.payload.size -ne 69903914) { throw 'Manifest is no longer in the expected stale state; re-evaluate before proceeding.' }
+          "SETUP=$setup" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          Write-Host 'PUBLIC_0166_EXACT_ASSETS_AND_STALE_MANIFEST_CONFIRMED'
+
+      - name: Prove current public setup failure is the manifest size mismatch
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Add-Type @'
+          using System;
+          using System.Runtime.InteropServices;
+          public static class SyntexSetupUi {
+            public delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
+            [DllImport("user32.dll")] public static extern bool EnumWindows(EnumWindowsProc callback, IntPtr lParam);
+            [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr hwnd);
+            [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hwnd, out uint pid);
+            [DllImport("user32.dll")] public static extern IntPtr GetDlgItem(IntPtr hwnd, int id);
+            [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern bool SetWindowText(IntPtr hwnd, string text);
+            [DllImport("user32.dll")] public static extern IntPtr SendMessage(IntPtr hwnd, uint msg, IntPtr wp, IntPtr lp);
+          }
+          '@
+          function Find-Window([uint32]$ExpectedPid) {
+            $script:found = [IntPtr]::Zero
+            $cb = [SyntexSetupUi+EnumWindowsProc]{
+              param([IntPtr]$hwnd,[IntPtr]$unused)
+              if (-not [SyntexSetupUi]::IsWindowVisible($hwnd)) { return $true }
+              [uint32]$pid = 0
+              [void][SyntexSetupUi]::GetWindowThreadProcessId($hwnd,[ref]$pid)
+              if ($pid -eq $ExpectedPid) { $script:found = $hwnd; return $false }
+              return $true
+            }
+            [void][SyntexSetupUi]::EnumWindows($cb,[IntPtr]::Zero)
+            return $script:found
+          }
+
+          $target = Join-Path $env:RUNNER_TEMP 'Syntex-0166-stale-manifest-proof'
+          Remove-Item $target -Recurse -Force -ErrorAction SilentlyContinue
+          $logDir = Join-Path (Split-Path $env:SETUP -Parent) 'SyntexSetup-Log'
+          Remove-Item $logDir -Recurse -Force -ErrorAction SilentlyContinue
+          $p = Start-Process -FilePath $env:SETUP -PassThru
+          try {
+            $deadline = [DateTime]::UtcNow.AddSeconds(30)
+            $window = [IntPtr]::Zero
+            while ([DateTime]::UtcNow -lt $deadline -and $window -eq [IntPtr]::Zero) {
+              Start-Sleep -Milliseconds 200
+              if ($p.HasExited) { throw "Published setup exited before GUI, code $($p.ExitCode)." }
+              $window = Find-Window ([uint32]$p.Id)
+            }
+            if ($window -eq [IntPtr]::Zero) { throw 'Published setup GUI was not found.' }
+            $pathEdit = [SyntexSetupUi]::GetDlgItem($window,1001)
+            $installButton = [SyntexSetupUi]::GetDlgItem($window,1003)
+            if ($pathEdit -eq [IntPtr]::Zero -or $installButton -eq [IntPtr]::Zero) { throw 'Published setup controls were not found.' }
+            if (-not [SyntexSetupUi]::SetWindowText($pathEdit,$target)) { throw 'Could not set setup target.' }
+            [void][SyntexSetupUi]::SendMessage($installButton,0x00F5,[IntPtr]::Zero,[IntPtr]::Zero)
+
+            $deadline = [DateTime]::UtcNow.AddMinutes(2)
+            $proof = $null
+            while ([DateTime]::UtcNow -lt $deadline) {
+              if (Test-Path $logDir) {
+                foreach ($log in @(Get-ChildItem $logDir -Filter 'SyntexSetup-Error-*.log' -File)) {
+                  $text = Get-Content $log.FullName -Raw
+                  if ($text -match 'Dateigröße stimmt nicht mit dem Manifest überein') { $proof = $log; break }
+                }
+              }
+              if ($null -ne $proof) { break }
+              Start-Sleep -Milliseconds 500
+            }
+            if ($null -eq $proof) {
+              if (Test-Path $logDir) { Get-ChildItem $logDir -File | ForEach-Object { Write-Host "--- $($_.Name) ---"; Get-Content $_.FullName -Raw } }
+              throw 'Setup did not produce the expected stale-manifest size-mismatch failure.'
+            }
+            Write-Host "PUBLIC_0166_STALE_MANIFEST_BLOCKER_PROVEN log=$($proof.Name)"
+          }
+          finally {
+            Get-Process SyntexLauncher* -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+            if (-not $p.HasExited) { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue }
+          }
