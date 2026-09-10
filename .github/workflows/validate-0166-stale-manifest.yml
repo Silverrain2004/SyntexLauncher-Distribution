@@ -42,14 +42,17 @@ jobs:
           $ErrorActionPreference = 'Stop'
           Add-Type @'
           using System;
+          using System.Text;
           using System.Runtime.InteropServices;
           public static class SyntexSetupUi {
             public delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
             [DllImport("user32.dll")] public static extern bool EnumWindows(EnumWindowsProc callback, IntPtr lParam);
             [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr hwnd);
+            [DllImport("user32.dll")] public static extern bool IsWindowEnabled(IntPtr hwnd);
             [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hwnd, out uint processId);
             [DllImport("user32.dll")] public static extern IntPtr GetDlgItem(IntPtr hwnd, int id);
             [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern bool SetWindowText(IntPtr hwnd, string text);
+            [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetWindowText(IntPtr hwnd, StringBuilder text, int max);
             [DllImport("user32.dll")] public static extern IntPtr SendMessage(IntPtr hwnd, uint msg, IntPtr wp, IntPtr lp);
           }
           '@
@@ -65,6 +68,12 @@ jobs:
             }
             [void][SyntexSetupUi]::EnumWindows($cb,[IntPtr]::Zero)
             return $script:found
+          }
+          function Read-Text([IntPtr]$Hwnd) {
+            if ($Hwnd -eq [IntPtr]::Zero) { return '' }
+            $text = New-Object Text.StringBuilder 2048
+            [void][SyntexSetupUi]::GetWindowText($Hwnd,$text,$text.Capacity)
+            return $text.ToString()
           }
 
           $target = Join-Path $env:RUNNER_TEMP 'Syntex-0166-stale-manifest-proof'
@@ -82,12 +91,18 @@ jobs:
             }
             if ($window -eq [IntPtr]::Zero) { throw 'Published setup GUI was not found.' }
             $pathEdit = [SyntexSetupUi]::GetDlgItem($window,1001)
+            $statusText = [SyntexSetupUi]::GetDlgItem($window,1004)
             $installButton = [SyntexSetupUi]::GetDlgItem($window,1003)
             if ($pathEdit -eq [IntPtr]::Zero -or $installButton -eq [IntPtr]::Zero) { throw 'Published setup controls were not found.' }
             if (-not [SyntexSetupUi]::SetWindowText($pathEdit,$target)) { throw 'Could not set setup target.' }
-            [void][SyntexSetupUi]::SendMessage($installButton,0x00F5,[IntPtr]::Zero,[IntPtr]::Zero)
+            Write-Host "SETUP_BEFORE_COMMAND buttonEnabled=$([SyntexSetupUi]::IsWindowEnabled($installButton)) path=$(Read-Text $pathEdit) status=$(Read-Text $statusText)"
+            # WM_COMMAND / BN_CLICKED is sent to the setup window itself. This exercises the
+            # same WindowProc branch as a real user click without relying on BM_CLICK behavior.
+            [void][SyntexSetupUi]::SendMessage($window,0x0111,[IntPtr]1003,$installButton)
+            Start-Sleep -Seconds 2
+            Write-Host "SETUP_AFTER_COMMAND buttonEnabled=$([SyntexSetupUi]::IsWindowEnabled($installButton)) path=$(Read-Text $pathEdit) status=$(Read-Text $statusText) targetExists=$(Test-Path $target)"
 
-            $deadline = [DateTime]::UtcNow.AddMinutes(2)
+            $deadline = [DateTime]::UtcNow.AddSeconds(45)
             $proof = $null
             while ([DateTime]::UtcNow -lt $deadline) {
               if (Test-Path $logDir) {
@@ -100,6 +115,8 @@ jobs:
               Start-Sleep -Milliseconds 500
             }
             if ($null -eq $proof) {
+              Write-Host "SETUP_FINAL buttonEnabled=$([SyntexSetupUi]::IsWindowEnabled($installButton)) status=$(Read-Text $statusText) targetExists=$(Test-Path $target)"
+              if (Test-Path $target) { Get-ChildItem -LiteralPath $target -Force -Recurse | Select-Object -First 50 FullName,Length | Format-Table -AutoSize | Out-String | Write-Host }
               if (Test-Path $logDir) { Get-ChildItem $logDir -File | ForEach-Object { Write-Host "--- $($_.Name) ---"; Get-Content $_.FullName -Raw } }
               throw 'Setup did not produce the expected stale-manifest size-mismatch failure.'
             }
