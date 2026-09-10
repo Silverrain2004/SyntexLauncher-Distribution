@@ -2,6 +2,29 @@ param([Parameter(Mandatory=$true)][string]$SetupSource)
 $ErrorActionPreference='Stop'
 $s=Get-Content $SetupSource -Raw
 $s=$s.Replace('#include <windows.h>',"#include <windows.h>`r`n#include <tlhelp32.h>")
+
+$httpAnchor='static bool HttpDownload(const std::wstring& url, const fs::path& target, unsigned long long expectedSize, std::wstring& error, bool reportProgress) {'
+if(-not $s.Contains($httpAnchor)){throw 'HttpDownload anchor missing'}
+$httpPrefix=@'
+static fs::path gCiPayloadSource;
+
+static bool HttpDownload(const std::wstring& url, const fs::path& target, unsigned long long expectedSize, std::wstring& error, bool reportProgress) {
+    if (!gCiPayloadSource.empty()) {
+        std::error_code ec;
+        fs::copy_file(gCiPayloadSource, target, fs::copy_options::overwrite_existing, ec);
+        if (ec) {
+            error = L"Lokales CI-Payload konnte nicht bereitgestellt werden.";
+            return false;
+        }
+        if (expectedSize && fs::file_size(target, ec) != expectedSize) {
+            error = L"Lokales CI-Payload hat eine unerwartete Dateigröße.";
+            return false;
+        }
+        return true;
+    }
+'@
+$s=$s.Replace($httpAnchor,$httpPrefix)
+
 $anchor='static bool LaunchVerify(const fs::path& root, bool ciMode, std::wstring& error) {'
 if(-not $s.Contains($anchor)){throw 'LaunchVerify anchor missing'}
 $helper=@'
@@ -79,6 +102,7 @@ $s=$s.Replace($anchor,$helper+$anchor)
 $old='const std::wstring command = Quote(host.wstring()) + (ciMode ? L" --ci-gui-self-test" : L"");'
 if(-not $s.Contains($old)){throw 'LaunchVerify command anchor missing'}
 $s=$s.Replace($old,'const std::wstring command = Quote(host.wstring()) + L" --post-update-health-check";')
+
 $pattern='progress\(87, L"Vorhandene Programmdateien werden transaktional gesichert …"\);\s*if \(!SyntexSetupRepair::Begin\(root, stage, transaction, error\)\) \{ cleanup\(\); return false; \}'
 if(-not [regex]::IsMatch($s,$pattern)){throw 'Repair transaction anchor missing'}
 $replacement=@'
@@ -89,20 +113,33 @@ progress(86, L"Laufender Syntex Launcher wird für Installation/Aktualisierung b
     if (!SyntexSetupRepair::Begin(root, stage, transaction, error)) { cleanup(); return false; }
 '@
 $s=[regex]::Replace($s,$pattern,$replacement,1)
+
 $ciAnchor='    if (argv && argc == 3 && _wcsicmp(argv[1], L"--ci-install") == 0) {'
 if(-not $s.Contains($ciAnchor)){throw 'CI install anchor missing'}
-$ciStop=@'
+$ciModes=@'
     if (argv && argc == 3 && _wcsicmp(argv[1], L"--ci-stop-launcher") == 0) {
         const fs::path target(argv[2]);
         LocalFree(argv);
         std::wstring stopError;
         return StopLauncherProgramProcesses(target, stopError) ? 0 : 6;
     }
+    if (argv && argc == 4 && _wcsicmp(argv[1], L"--ci-install-local") == 0) {
+        const fs::path target(argv[2]);
+        gCiPayloadSource = fs::path(argv[3]);
+        LocalFree(argv);
+        bool repair = false;
+        std::wstring error;
+        const bool ok = InstallCore(target, true, false, repair, error);
+        gCiPayloadSource.clear();
+        if (!ok) { WriteSetupLog(L"CI local install E2E: " + error); return 7; }
+        return 0;
+    }
 '@
-$s=$s.Replace($ciAnchor,$ciStop+$ciAnchor)
+$s=$s.Replace($ciAnchor,$ciModes+$ciAnchor)
+
 $s=$s.Replace('Syntex Launcher Setup 0.16.6 RC1','Syntex Launcher Setup 0.16.7')
 $s=$s.Replace('Syntex Launcher Setup 0.16.6','Syntex Launcher Setup 0.16.7')
 $s=$s.Replace('SyntexLauncherSetup/0.16.6-RC1','SyntexLauncherSetup/0.16.7')
 $s=$s.Replace('DisplayVersion", L"0.16.6"','DisplayVersion", L"0.16.7"')
 Set-Content $SetupSource $s -Encoding utf8
-Write-Host 'SETUP_FORCE_PROCESS_DRAIN_BEFORE_TRANSACTION_PATCH_PASS'
+Write-Host 'SETUP_FORCE_PROCESS_DRAIN_LOCAL_PAYLOAD_TEST_PATCH_PASS'
