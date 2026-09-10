@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 1,
+  "product": "Syntex Launcher",
+  "channel": "ci-self-update",
+  "version": "0.16.7",
+  "runtimeIdentifier": "win-x64",
+  "minimumWindowsBuild": 17763,
+  "payload": {
+    "url": "https://github.com/Silverrain2004/SyntexLauncher-Distribution/releases/download/v0.16.7-self-update-smoke/SyntexLauncher-0.16.7-self-update-smoke.zip",
+    "sha256": "9eee8f87c572e9ba5a9b1416c81470a96c0e4d90c0b9b690ce4c333939c18809",
+    "size": 70057624
+  }
+}
