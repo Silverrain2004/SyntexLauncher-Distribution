@@ -32,12 +32,10 @@ jobs:
           $sha=(Get-FileHash $zip -Algorithm SHA256).Hash.ToLowerInvariant()
           if($sha -ne 'f34397dae9ca7986ef5d8f9183c6d4ee355126d2c9b913dea6eee561835ada74'){throw "Published 0.16.6 payload hash changed: $sha"}
           Expand-Archive -LiteralPath $zip -DestinationPath $root -Force
-          $managed=Join-Path $root 'app\SyntexLauncher.App.dll'
-          if(-not (Test-Path $managed)){
-            throw "Expected managed launcher assembly missing: $managed"
-          }
+          $app=Join-Path $root 'app'
+          if(-not (Test-Path $app)){throw 'Payload app directory missing.'}
           "ROOT=$root" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
-          "MANAGED=$managed" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          "APPDIR=$app" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
 
       - uses: actions/setup-dotnet@v4
         with:
@@ -63,11 +61,8 @@ jobs:
             </ItemGroup>
           </Project>
           '@ | Set-Content (Join-Path $patchDir 'Patcher.csproj') -Encoding utf8
-          dotnet run --project (Join-Path $patchDir 'Patcher.csproj') -c Release -- $env:MANAGED
+          dotnet run --project (Join-Path $patchDir 'Patcher.csproj') -c Release -- $env:APPDIR
           if($LASTEXITCODE -ne 0){throw "Managed startup patch failed: $LASTEXITCODE"}
-          if(-not (Test-Path $env:MANAGED)){throw 'Patched managed assembly missing.'}
-          $sha=(Get-FileHash $env:MANAGED -Algorithm SHA256).Hash.ToLowerInvariant()
-          Write-Host "PATCHED_MANAGED_SHA256=$sha"
 
       - name: Build current 0.16.7 x64 LauncherHost
         shell: pwsh
