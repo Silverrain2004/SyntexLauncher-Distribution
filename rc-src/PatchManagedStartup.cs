@@ -23,6 +23,14 @@ if (Directory.Exists(args[0]))
 }
 else path = args[0];
 
+static IEnumerable<TypeDefinition> AllTypes(TypeDefinition root)
+{
+    yield return root;
+    foreach (var nested in root.NestedTypes)
+        foreach (var type in AllTypes(nested))
+            yield return type;
+}
+
 using var asm = AssemblyDefinition.ReadAssembly(path, new ReaderParameters { InMemory = true });
 var module = asm.MainModule;
 var type = module.Types.Single(t => t.FullName == targetTypeName);
@@ -92,9 +100,9 @@ deferredIl.Append(deferredIl.Create(OpCodes.Call, clone));
 deferredIl.Append(deferredIl.Create(OpCodes.Pop));
 deferredIl.Append(deferredIl.Create(OpCodes.Ret));
 
-// Always defer initialization until Avalonia has had a chance to perform layout/render.
-// Persistent launcher state can make InitializeAsync progress synchronously for longer than a
-// first-run path, so normal/default dispatcher priority is not strong enough as a render barrier.
+// The shipped App.OnFrameworkInitializationCompleted is async void and awaits InitializeAsync
+// before assigning desktop.MainWindow. Make that call return immediately and do the expensive
+// initialization later on the UI dispatcher, so the App state machine can reach MainWindow first.
 var directory = Path.GetDirectoryName(path) ?? throw new InvalidOperationException("assembly directory missing");
 var avaloniaBasePath = Path.Combine(directory, "Avalonia.Base.dll");
 if (!File.Exists(avaloniaBasePath))
@@ -138,8 +146,54 @@ il.Append(il.Create(OpCodes.Callvirt, module.ImportReference(post)));
 il.Append(il.Create(OpCodes.Call, module.ImportReference(completed)));
 il.Append(il.Create(OpCodes.Ret));
 
+// A previous await inside App.OnFrameworkInitializationCompleted can make Avalonia's lifetime
+// continue before MainWindow is assigned. The trace proved that the correct top-level window then
+// exists and remains responsive but Visible=false forever. Explicitly Show() the exact window as
+// soon as the App state machine assigns it to desktop.MainWindow.
+var avaloniaControlsPath = Path.Combine(directory, "Avalonia.Controls.dll");
+if (!File.Exists(avaloniaControlsPath))
+    throw new FileNotFoundException("Avalonia.Controls.dll not found next to launcher assembly", avaloniaControlsPath);
+
+using var avaloniaControls = AssemblyDefinition.ReadAssembly(avaloniaControlsPath, new ReaderParameters { InMemory = true });
+var windowType = avaloniaControls.MainModule.Types.Single(t => t.FullName == "Avalonia.Controls.Window");
+var showMethod = windowType.Methods.Single(m => m.Name == "Show" && !m.IsStatic && m.Parameters.Count == 0);
+var importedWindowType = module.ImportReference(windowType);
+var importedShow = module.ImportReference(showMethod);
+
+var appType = module.Types.Single(t => t.FullName == "Syntex.Launcher.App");
+var mainWindowSetterSites = AllTypes(appType)
+    .SelectMany(t => t.Methods)
+    .Where(m => m.HasBody)
+    .SelectMany(m => m.Body.Instructions.Select(i => (Method: m, Instruction: i)))
+    .Where(x => x.Instruction.Operand is MethodReference mr
+        && mr.Name == "set_MainWindow"
+        && mr.DeclaringType.FullName == "Avalonia.Controls.ApplicationLifetimes.IClassicDesktopStyleApplicationLifetime")
+    .ToList();
+
+if (mainWindowSetterSites.Count != 1)
+    throw new InvalidOperationException($"Expected exactly one desktop.MainWindow assignment in App lifecycle, found {mainWindowSetterSites.Count}.");
+
+var site = mainWindowSetterSites[0];
+var body = site.Method.Body;
+body.InitLocals = true;
+body.MaxStackSize = Math.Max(body.MaxStackSize, 3);
+var windowLocal = new VariableDefinition(importedWindowType);
+body.Variables.Add(windowLocal);
+var appIl = body.GetILProcessor();
+
+// Immediately before set_MainWindow the evaluation stack is [desktop, window]. Preserve the
+// window in a local without disturbing that stack, call the setter, then Show() the same instance.
+var duplicateWindow = appIl.Create(OpCodes.Dup);
+var saveWindow = appIl.Create(OpCodes.Stloc, windowLocal);
+appIl.InsertBefore(site.Instruction, duplicateWindow);
+appIl.InsertBefore(site.Instruction, saveWindow);
+var loadWindow = appIl.Create(OpCodes.Ldloc, windowLocal);
+var showWindow = appIl.Create(OpCodes.Callvirt, importedShow);
+appIl.InsertAfter(site.Instruction, loadWindow);
+appIl.InsertAfter(loadWindow, showWindow);
+
 var temporary = path + ".patched";
 asm.Write(temporary);
 File.Copy(temporary, path, true);
 File.Delete(temporary);
-Console.WriteLine($"PATCH_OK_AVALONIA_DISPATCHER:{Path.GetFileName(path)}:POST_PARAMS={post.Parameters.Count}:PRIORITY=BACKGROUND");
+Console.WriteLine($"PATCH_OK_AVALONIA_LIFECYCLE:{Path.GetFileName(path)}:POST_PARAMS={post.Parameters.Count}:PRIORITY=BACKGROUND:EXPLICIT_SHOW=1");
