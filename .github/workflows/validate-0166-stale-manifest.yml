@@ -1,4 +1,4 @@
-name: Validate 0.16.6 Stale Manifest Blocker
+name: Validate Current Syntex 0.16.6
 
 on:
   push:
@@ -11,11 +11,11 @@ permissions:
   contents: read
 
 jobs:
-  verify-stale-manifest-blocker:
+  verify-current-public-0166:
     runs-on: windows-latest
-    timeout-minutes: 8
+    timeout-minutes: 10
     steps:
-      - name: Verify exact public assets and stale manifest state
+      - name: Verify exact immutable candidate assets and current stale manifest
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -33,10 +33,17 @@ jobs:
           if ($payloadHash -ne 'f34397dae9ca7986ef5d8f9183c6d4ee355126d2c9b913dea6eee561835ada74' -or $payloadSize -ne 69903997) { throw 'Public payload changed; do not repair the manifest.' }
           if ($setupHash -ne '7d785b1b4205ccb9bc59ab630bebd93a9853ba8f4bbf491f8315091e12241c17' -or (Get-Item $setup).Length -ne 331776) { throw 'Public setup changed; do not repair the manifest.' }
           if ($manifest.payload.sha256 -ne '78870eca0ce18e16010b014d1e5f4a7c7a5a6d633bb94a62327fb3e23db7c743' -or [int64]$manifest.payload.size -ne 69903914) { throw 'Manifest is no longer in the expected stale state; re-evaluate before proceeding.' }
-          "SETUP=$setup" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
-          Write-Host 'PUBLIC_0166_EXACT_ASSETS_AND_STALE_MANIFEST_CONFIRMED'
 
-      - name: Prove current public setup failure is the manifest size mismatch
+          $bytes = [IO.File]::ReadAllBytes($setup)
+          if ($bytes[0] -ne 0x4D -or $bytes[1] -ne 0x5A) { throw 'Published setup is not a PE executable.' }
+          $pe = [BitConverter]::ToInt32($bytes,0x3C)
+          if ([BitConverter]::ToUInt16($bytes,$pe+4) -ne 0x8664) { throw 'Published setup is not AMD64.' }
+
+          "SETUP=$setup" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          "PAYLOAD=$payload" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          Write-Host 'PUBLIC_0166_EXACT_ASSETS_CONFIRMED'
+
+      - name: Install through real public Setup GUI and prove a real launcher window
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -44,127 +51,157 @@ jobs:
           using System;
           using System.Text;
           using System.Runtime.InteropServices;
-          public static class SyntexSetupUi {
+          public static class SyntexUi {
             public delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
             public delegate bool EnumChildProc(IntPtr hWnd, IntPtr lParam);
             [DllImport("user32.dll")] public static extern bool EnumWindows(EnumWindowsProc callback, IntPtr lParam);
             [DllImport("user32.dll")] public static extern bool EnumChildWindows(IntPtr parent, EnumChildProc callback, IntPtr lParam);
             [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr hwnd);
-            [DllImport("user32.dll")] public static extern bool IsWindowEnabled(IntPtr hwnd);
             [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hwnd, out uint processId);
             [DllImport("user32.dll")] public static extern IntPtr GetDlgItem(IntPtr hwnd, int id);
-            [DllImport("user32.dll")] public static extern int GetDlgCtrlID(IntPtr hwnd);
             [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern bool SetWindowText(IntPtr hwnd, string text);
             [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetWindowText(IntPtr hwnd, StringBuilder text, int max);
             [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetClassName(IntPtr hwnd, StringBuilder text, int max);
             [DllImport("user32.dll")] public static extern IntPtr SendMessage(IntPtr hwnd, uint msg, IntPtr wp, IntPtr lp);
           }
           '@
-          function Read-Text([IntPtr]$Hwnd) {
+          function Read-WindowText([IntPtr]$Hwnd) {
             if ($Hwnd -eq [IntPtr]::Zero) { return '' }
-            $text = New-Object Text.StringBuilder 4096
-            [void][SyntexSetupUi]::GetWindowText($Hwnd,$text,$text.Capacity)
-            return $text.ToString()
+            $b = New-Object Text.StringBuilder 4096
+            [void][SyntexUi]::GetWindowText($Hwnd,$b,$b.Capacity)
+            $b.ToString()
           }
-          function Read-Class([IntPtr]$Hwnd) {
-            $text = New-Object Text.StringBuilder 256
-            [void][SyntexSetupUi]::GetClassName($Hwnd,$text,$text.Capacity)
-            return $text.ToString()
-          }
-          function Find-MainWindow([uint32]$ExpectedPid) {
-            $script:found = [IntPtr]::Zero
-            $cb = [SyntexSetupUi+EnumWindowsProc]{
+          function Find-SetupWindow([uint32]$ExpectedPid) {
+            $script:setupWindow = [IntPtr]::Zero
+            $cb = [SyntexUi+EnumWindowsProc]{
               param([IntPtr]$hwnd,[IntPtr]$unused)
-              if (-not [SyntexSetupUi]::IsWindowVisible($hwnd)) { return $true }
+              if (-not [SyntexUi]::IsWindowVisible($hwnd)) { return $true }
               [uint32]$windowPid = 0
-              [void][SyntexSetupUi]::GetWindowThreadProcessId($hwnd,[ref]$windowPid)
-              if ($windowPid -eq $ExpectedPid -and [SyntexSetupUi]::GetDlgItem($hwnd,1001) -ne [IntPtr]::Zero -and [SyntexSetupUi]::GetDlgItem($hwnd,1003) -ne [IntPtr]::Zero) {
-                $script:found = $hwnd
+              [void][SyntexUi]::GetWindowThreadProcessId($hwnd,[ref]$windowPid)
+              if ($windowPid -eq $ExpectedPid -and [SyntexUi]::GetDlgItem($hwnd,1001) -ne [IntPtr]::Zero -and [SyntexUi]::GetDlgItem($hwnd,1003) -ne [IntPtr]::Zero) {
+                $script:setupWindow = $hwnd
                 return $false
               }
               return $true
             }
-            [void][SyntexSetupUi]::EnumWindows($cb,[IntPtr]::Zero)
-            return $script:found
+            [void][SyntexUi]::EnumWindows($cb,[IntPtr]::Zero)
+            $script:setupWindow
           }
-          function Get-ProcessWindows([uint32]$ExpectedPid) {
-            $script:windows = @()
-            $cb = [SyntexSetupUi+EnumWindowsProc]{
+          function Get-VisibleWindowRows {
+            $script:rows = @()
+            $cb = [SyntexUi+EnumWindowsProc]{
               param([IntPtr]$hwnd,[IntPtr]$unused)
-              if (-not [SyntexSetupUi]::IsWindowVisible($hwnd)) { return $true }
+              if (-not [SyntexUi]::IsWindowVisible($hwnd)) { return $true }
               [uint32]$windowPid = 0
-              [void][SyntexSetupUi]::GetWindowThreadProcessId($hwnd,[ref]$windowPid)
-              if ($windowPid -ne $ExpectedPid) { return $true }
-              $childCb = [SyntexSetupUi+EnumChildProc]{
-                param([IntPtr]$child,[IntPtr]$unused2)
-                if ([SyntexSetupUi]::IsWindowVisible($child)) {
-                  $script:childRows += [pscustomobject]@{ id=[SyntexSetupUi]::GetDlgCtrlID($child); class=(Read-Class $child); text=(Read-Text $child); enabled=[SyntexSetupUi]::IsWindowEnabled($child) }
+              [void][SyntexUi]::GetWindowThreadProcessId($hwnd,[ref]$windowPid)
+              $title = Read-WindowText $hwnd
+              $script:rows += [pscustomobject]@{ Hwnd=$hwnd; Pid=$windowPid; Title=$title }
+              return $true
+            }
+            [void][SyntexUi]::EnumWindows($cb,[IntPtr]::Zero)
+            @($script:rows)
+          }
+          function Get-SetupText([uint32]$SetupPid) {
+            $texts = @()
+            foreach ($w in @(Get-VisibleWindowRows | Where-Object Pid -eq $SetupPid)) {
+              if ($w.Title) { $texts += $w.Title }
+              $script:childTexts = @()
+              $childCb = [SyntexUi+EnumChildProc]{
+                param([IntPtr]$child,[IntPtr]$unused)
+                if ([SyntexUi]::IsWindowVisible($child)) {
+                  $t = Read-WindowText $child
+                  if ($t) { $script:childTexts += $t }
                 }
                 return $true
               }
-              $script:childRows = @()
-              [void][SyntexSetupUi]::EnumChildWindows($hwnd,$childCb,[IntPtr]::Zero)
-              $script:windows += [pscustomobject]@{ hwnd=('0x{0:X}' -f $hwnd.ToInt64()); class=(Read-Class $hwnd); title=(Read-Text $hwnd); children=@($script:childRows) }
-              return $true
+              [void][SyntexUi]::EnumChildWindows($w.Hwnd,$childCb,[IntPtr]::Zero)
+              $texts += $script:childTexts
             }
-            [void][SyntexSetupUi]::EnumWindows($cb,[IntPtr]::Zero)
-            return @($script:windows)
-          }
-          function Write-Snapshot([uint32]$ExpectedPid,[IntPtr]$Main,[string]$Label) {
-            $progress = [SyntexSetupUi]::GetDlgItem($Main,1004)
-            $position = if ($progress -ne [IntPtr]::Zero) { [SyntexSetupUi]::SendMessage($progress,0x0408,[IntPtr]::Zero,[IntPtr]::Zero).ToInt32() } else { -1 }
-            Write-Host "=== $Label progress=$position targetExists=$(Test-Path $target) ==="
-            foreach ($w in @(Get-ProcessWindows $ExpectedPid)) {
-              Write-Host "WINDOW class=$($w.class) title=[$($w.title)] hwnd=$($w.hwnd)"
-              foreach ($c in @($w.children)) { Write-Host "  CHILD id=$($c.id) class=$($c.class) enabled=$($c.enabled) text=[$($c.text)]" }
-            }
+            ($texts -join "`n")
           }
 
-          $target = Join-Path $env:RUNNER_TEMP 'Syntex-0166-stale-manifest-proof'
-          Remove-Item $target -Recurse -Force -ErrorAction SilentlyContinue
+          $requestedRoot = Join-Path $env:RUNNER_TEMP 'Syntex-Public-0166-Verified'
+          Remove-Item $requestedRoot -Recurse -Force -ErrorAction SilentlyContinue
           $logDir = Join-Path (Split-Path $env:SETUP -Parent) 'SyntexSetup-Log'
           Remove-Item $logDir -Recurse -Force -ErrorAction SilentlyContinue
-          $p = Start-Process -FilePath $env:SETUP -PassThru
+          Remove-Item 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\SyntexLauncher' -Recurse -Force -ErrorAction SilentlyContinue
+
+          $setupProcess = Start-Process -FilePath $env:SETUP -PassThru
           try {
             $deadline = [DateTime]::UtcNow.AddSeconds(30)
-            $window = [IntPtr]::Zero
-            while ([DateTime]::UtcNow -lt $deadline -and $window -eq [IntPtr]::Zero) {
+            $setupWindow = [IntPtr]::Zero
+            while ([DateTime]::UtcNow -lt $deadline -and $setupWindow -eq [IntPtr]::Zero) {
               Start-Sleep -Milliseconds 200
-              if ($p.HasExited) { throw "Published setup exited before GUI, code $($p.ExitCode)." }
-              $window = Find-MainWindow ([uint32]$p.Id)
+              if ($setupProcess.HasExited) { throw "Published setup exited before GUI: $($setupProcess.ExitCode)" }
+              $setupWindow = Find-SetupWindow ([uint32]$setupProcess.Id)
             }
-            if ($window -eq [IntPtr]::Zero) {
-              foreach ($w in @(Get-ProcessWindows ([uint32]$p.Id))) { Write-Host "UNMATCHED WINDOW class=$($w.class) title=[$($w.title)]" }
-              throw 'Published setup GUI with expected controls was not found.'
-            }
-            $pathEdit = [SyntexSetupUi]::GetDlgItem($window,1001)
-            $installButton = [SyntexSetupUi]::GetDlgItem($window,1003)
-            if (-not [SyntexSetupUi]::SetWindowText($pathEdit,$target)) { throw 'Could not set setup target.' }
-            Write-Snapshot ([uint32]$p.Id) $window 'BEFORE_COMMAND'
-            [void][SyntexSetupUi]::SendMessage($window,0x0111,[IntPtr]1003,$installButton)
+            if ($setupWindow -eq [IntPtr]::Zero) { throw 'Published setup window with install controls was not found.' }
 
-            $deadline = [DateTime]::UtcNow.AddSeconds(150)
-            $nextSnapshot = [DateTime]::UtcNow
-            $proof = $false
+            $pathEdit = [SyntexUi]::GetDlgItem($setupWindow,1001)
+            $installButton = [SyntexUi]::GetDlgItem($setupWindow,1003)
+            if (-not [SyntexUi]::SetWindowText($pathEdit,$requestedRoot)) { throw 'Could not set requested installation root.' }
+            if ((Read-WindowText $pathEdit) -ne $requestedRoot) { throw 'Setup edit control did not retain requested installation root.' }
+            [void][SyntexUi]::SendMessage($setupWindow,0x0111,[IntPtr]1003,$installButton)
+
+            $deadline = [DateTime]::UtcNow.AddMinutes(4)
+            $successText = 'Syntex Launcher wurde installiert und der Launcher-Start wurde geprüft.'
             while ([DateTime]::UtcNow -lt $deadline) {
-              if ($p.HasExited) { throw "Published setup exited unexpectedly, code $($p.ExitCode)." }
-              $allText = (@(Get-ProcessWindows ([uint32]$p.Id)) | ConvertTo-Json -Depth 6 -Compress)
-              if ($allText -match 'Dateigröße stimmt nicht mit dem Manifest überein') { $proof = $true; break }
-              if ([DateTime]::UtcNow -ge $nextSnapshot) {
-                Write-Snapshot ([uint32]$p.Id) $window 'INSTALLING'
-                $nextSnapshot = [DateTime]::UtcNow.AddSeconds(10)
+              if ($setupProcess.HasExited) { throw "Published setup exited before success proof: $($setupProcess.ExitCode)" }
+              $text = Get-SetupText ([uint32]$setupProcess.Id)
+              if ($text -match 'Fehler' -or $text -match 'fehlgeschlagen') {
+                if (Test-Path $logDir) { Get-ChildItem $logDir -File | ForEach-Object { Write-Host "--- $($_.Name) ---"; Get-Content $_.FullName -Raw } }
+                throw "Published setup reported failure: $text"
               }
+              if ($text.Contains($successText)) { break }
               Start-Sleep -Milliseconds 500
             }
-            Write-Snapshot ([uint32]$p.Id) $window 'FINAL'
-            if (-not $proof) {
-              if (Test-Path $target) { Get-ChildItem -LiteralPath $target -Force -Recurse | Select-Object -First 50 FullName,Length | Format-Table -AutoSize | Out-String | Write-Host }
-              if (Test-Path $logDir) { Get-ChildItem $logDir -File | ForEach-Object { Write-Host "--- $($_.Name) ---"; Get-Content $_.FullName -Raw } }
-              throw 'Setup did not expose the expected stale-manifest size-mismatch failure.'
+            if (-not (Get-SetupText ([uint32]$setupProcess.Id)).Contains($successText)) { throw 'Published setup never reached its successful install/start state.' }
+
+            $regPath = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\SyntexLauncher'
+            if (-not (Test-Path $regPath)) { throw 'Successful setup did not register an installation root.' }
+            $installedRoot = (Get-ItemProperty $regPath).InstallLocation
+            if ([string]::IsNullOrWhiteSpace($installedRoot)) { throw 'Registered InstallLocation is empty.' }
+            $installedRoot = [IO.Path]::GetFullPath($installedRoot).TrimEnd('\')
+            $expectedRoot = [IO.Path]::GetFullPath($requestedRoot).TrimEnd('\')
+            if ($installedRoot -ne $expectedRoot) { throw "Setup ignored the requested installation root. Expected [$expectedRoot], registered [$installedRoot]." }
+
+            foreach ($relative in @('SyntexLauncher.exe','app\SyntexLauncher.exe','app\SyntexUninstall.exe')) {
+              if (-not (Test-Path (Join-Path $installedRoot $relative))) { throw "Installed payload is missing $relative" }
             }
-            Write-Host 'PUBLIC_0166_STALE_MANIFEST_BLOCKER_PROVEN'
+
+            $launcherWindow = $null
+            $deadline = [DateTime]::UtcNow.AddSeconds(30)
+            while ([DateTime]::UtcNow -lt $deadline -and -not $launcherWindow) {
+              foreach ($row in @(Get-VisibleWindowRows)) {
+                if ($row.Pid -eq $setupProcess.Id -or [string]::IsNullOrWhiteSpace($row.Title) -or $row.Title -match 'Setup') { continue }
+                try {
+                  $proc = Get-Process -Id $row.Pid -ErrorAction Stop
+                  $path = $proc.Path
+                  if ($path -and [IO.Path]::GetFullPath($path).StartsWith($installedRoot + '\',[StringComparison]::OrdinalIgnoreCase)) {
+                    $launcherWindow = [pscustomobject]@{ Pid=$row.Pid; Title=$row.Title; Path=$path; Hwnd=$row.Hwnd }
+                    break
+                  }
+                } catch {}
+              }
+              if (-not $launcherWindow) { Start-Sleep -Milliseconds 250 }
+            }
+            if (-not $launcherWindow) { throw 'No real visible top-level launcher window from the installed Syntex tree was found.' }
+
+            $payloadExtract = Join-Path $env:RUNNER_TEMP 'payload-verified-extract'
+            Remove-Item $payloadExtract -Recurse -Force -ErrorAction SilentlyContinue
+            Expand-Archive -LiteralPath $env:PAYLOAD -DestinationPath $payloadExtract -Force
+            $expectedHostHash = (Get-FileHash (Join-Path $payloadExtract 'SyntexLauncher.exe') -Algorithm SHA256).Hash.ToLowerInvariant()
+            $installedHostHash = (Get-FileHash (Join-Path $installedRoot 'SyntexLauncher.exe') -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($installedHostHash -ne $expectedHostHash) { throw 'Installed native host does not match the independently verified public payload.' }
+
+            if (Test-Path $logDir) {
+              $errorLogs = @(Get-ChildItem $logDir -File -ErrorAction SilentlyContinue)
+              if ($errorLogs.Count -gt 0) { throw "Setup produced $($errorLogs.Count) error log(s) despite reporting success." }
+            }
+
+            Write-Host "PUBLIC_0166_REAL_INSTALL_AND_WINDOW_PASS root=$installedRoot launcherPid=$($launcherWindow.Pid) title=[$($launcherWindow.Title)]"
           }
           finally {
             Get-Process SyntexLauncher* -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
-            if (-not $p.HasExited) { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue }
+            if (-not $setupProcess.HasExited) { Stop-Process -Id $setupProcess.Id -Force -ErrorAction SilentlyContinue }
           }
