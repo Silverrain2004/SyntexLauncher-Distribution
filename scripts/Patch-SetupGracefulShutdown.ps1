@@ -38,7 +38,9 @@ static bool StopLauncherProgramProcesses(const fs::path& root, std::wstring& err
         // settings/logs and avoids creating a dirty next-start state.
         for (const DWORD pid : pids) RequestCloseForPid(pid);
 
-        const ULONGLONG gracefulDeadline = GetTickCount64() + 5000;
+        // Match the proven lifecycle gate: allow up to 15 seconds for a complete,
+        // clean shutdown before any exact-root force fallback is considered.
+        const ULONGLONG gracefulDeadline = GetTickCount64() + 15000;
         while (GetTickCount64() < gracefulDeadline) {
             if (OwnedLauncherProcessIds(root).empty()) return true;
             Sleep(100);
