@@ -46,34 +46,76 @@ jobs:
           using System.Runtime.InteropServices;
           public static class SyntexSetupUi {
             public delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
+            public delegate bool EnumChildProc(IntPtr hWnd, IntPtr lParam);
             [DllImport("user32.dll")] public static extern bool EnumWindows(EnumWindowsProc callback, IntPtr lParam);
+            [DllImport("user32.dll")] public static extern bool EnumChildWindows(IntPtr parent, EnumChildProc callback, IntPtr lParam);
             [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr hwnd);
             [DllImport("user32.dll")] public static extern bool IsWindowEnabled(IntPtr hwnd);
             [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hwnd, out uint processId);
             [DllImport("user32.dll")] public static extern IntPtr GetDlgItem(IntPtr hwnd, int id);
+            [DllImport("user32.dll")] public static extern int GetDlgCtrlID(IntPtr hwnd);
             [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern bool SetWindowText(IntPtr hwnd, string text);
             [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetWindowText(IntPtr hwnd, StringBuilder text, int max);
+            [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetClassName(IntPtr hwnd, StringBuilder text, int max);
             [DllImport("user32.dll")] public static extern IntPtr SendMessage(IntPtr hwnd, uint msg, IntPtr wp, IntPtr lp);
           }
           '@
-          function Find-Window([uint32]$ExpectedPid) {
+          function Read-Text([IntPtr]$Hwnd) {
+            if ($Hwnd -eq [IntPtr]::Zero) { return '' }
+            $text = New-Object Text.StringBuilder 4096
+            [void][SyntexSetupUi]::GetWindowText($Hwnd,$text,$text.Capacity)
+            return $text.ToString()
+          }
+          function Read-Class([IntPtr]$Hwnd) {
+            $text = New-Object Text.StringBuilder 256
+            [void][SyntexSetupUi]::GetClassName($Hwnd,$text,$text.Capacity)
+            return $text.ToString()
+          }
+          function Find-MainWindow([uint32]$ExpectedPid) {
             $script:found = [IntPtr]::Zero
             $cb = [SyntexSetupUi+EnumWindowsProc]{
               param([IntPtr]$hwnd,[IntPtr]$unused)
               if (-not [SyntexSetupUi]::IsWindowVisible($hwnd)) { return $true }
               [uint32]$windowPid = 0
               [void][SyntexSetupUi]::GetWindowThreadProcessId($hwnd,[ref]$windowPid)
-              if ($windowPid -eq $ExpectedPid) { $script:found = $hwnd; return $false }
+              if ($windowPid -eq $ExpectedPid -and (Read-Class $hwnd) -eq 'SyntexLauncherNativeSetup') { $script:found = $hwnd; return $false }
               return $true
             }
             [void][SyntexSetupUi]::EnumWindows($cb,[IntPtr]::Zero)
             return $script:found
           }
-          function Read-Text([IntPtr]$Hwnd) {
-            if ($Hwnd -eq [IntPtr]::Zero) { return '' }
-            $text = New-Object Text.StringBuilder 2048
-            [void][SyntexSetupUi]::GetWindowText($Hwnd,$text,$text.Capacity)
-            return $text.ToString()
+          function Get-ProcessWindows([uint32]$ExpectedPid) {
+            $script:windows = @()
+            $cb = [SyntexSetupUi+EnumWindowsProc]{
+              param([IntPtr]$hwnd,[IntPtr]$unused)
+              if (-not [SyntexSetupUi]::IsWindowVisible($hwnd)) { return $true }
+              [uint32]$windowPid = 0
+              [void][SyntexSetupUi]::GetWindowThreadProcessId($hwnd,[ref]$windowPid)
+              if ($windowPid -ne $ExpectedPid) { return $true }
+              $children = @()
+              $childCb = [SyntexSetupUi+EnumChildProc]{
+                param([IntPtr]$child,[IntPtr]$unused2)
+                if ([SyntexSetupUi]::IsWindowVisible($child)) {
+                  $script:childRows += [pscustomobject]@{ id=[SyntexSetupUi]::GetDlgCtrlID($child); class=(Read-Class $child); text=(Read-Text $child); enabled=[SyntexSetupUi]::IsWindowEnabled($child) }
+                }
+                return $true
+              }
+              $script:childRows = @()
+              [void][SyntexSetupUi]::EnumChildWindows($hwnd,$childCb,[IntPtr]::Zero)
+              $script:windows += [pscustomobject]@{ hwnd=('0x{0:X}' -f $hwnd.ToInt64()); class=(Read-Class $hwnd); title=(Read-Text $hwnd); children=@($script:childRows) }
+              return $true
+            }
+            [void][SyntexSetupUi]::EnumWindows($cb,[IntPtr]::Zero)
+            return @($script:windows)
+          }
+          function Write-Snapshot([uint32]$ExpectedPid,[IntPtr]$Main,[string]$Label) {
+            $progress = [SyntexSetupUi]::GetDlgItem($Main,1004)
+            $position = if ($progress -ne [IntPtr]::Zero) { [SyntexSetupUi]::SendMessage($progress,0x0408,[IntPtr]::Zero,[IntPtr]::Zero).ToInt32() } else { -1 }
+            Write-Host "=== $Label progress=$position targetExists=$(Test-Path $target) ==="
+            foreach ($w in @(Get-ProcessWindows $ExpectedPid)) {
+              Write-Host "WINDOW class=$($w.class) title=[$($w.title)] hwnd=$($w.hwnd)"
+              foreach ($c in @($w.children)) { Write-Host "  CHILD id=$($c.id) class=$($c.class) enabled=$($c.enabled) text=[$($c.text)]" }
+            }
           }
 
           $target = Join-Path $env:RUNNER_TEMP 'Syntex-0166-stale-manifest-proof'
@@ -87,40 +129,36 @@ jobs:
             while ([DateTime]::UtcNow -lt $deadline -and $window -eq [IntPtr]::Zero) {
               Start-Sleep -Milliseconds 200
               if ($p.HasExited) { throw "Published setup exited before GUI, code $($p.ExitCode)." }
-              $window = Find-Window ([uint32]$p.Id)
+              $window = Find-MainWindow ([uint32]$p.Id)
             }
             if ($window -eq [IntPtr]::Zero) { throw 'Published setup GUI was not found.' }
             $pathEdit = [SyntexSetupUi]::GetDlgItem($window,1001)
-            $statusText = [SyntexSetupUi]::GetDlgItem($window,1004)
             $installButton = [SyntexSetupUi]::GetDlgItem($window,1003)
             if ($pathEdit -eq [IntPtr]::Zero -or $installButton -eq [IntPtr]::Zero) { throw 'Published setup controls were not found.' }
             if (-not [SyntexSetupUi]::SetWindowText($pathEdit,$target)) { throw 'Could not set setup target.' }
-            Write-Host "SETUP_BEFORE_COMMAND buttonEnabled=$([SyntexSetupUi]::IsWindowEnabled($installButton)) path=$(Read-Text $pathEdit) status=$(Read-Text $statusText)"
-            # WM_COMMAND / BN_CLICKED is sent to the setup window itself. This exercises the
-            # same WindowProc branch as a real user click without relying on BM_CLICK behavior.
+            Write-Snapshot ([uint32]$p.Id) $window 'BEFORE_COMMAND'
             [void][SyntexSetupUi]::SendMessage($window,0x0111,[IntPtr]1003,$installButton)
-            Start-Sleep -Seconds 2
-            Write-Host "SETUP_AFTER_COMMAND buttonEnabled=$([SyntexSetupUi]::IsWindowEnabled($installButton)) path=$(Read-Text $pathEdit) status=$(Read-Text $statusText) targetExists=$(Test-Path $target)"
 
-            $deadline = [DateTime]::UtcNow.AddSeconds(45)
-            $proof = $null
+            $deadline = [DateTime]::UtcNow.AddSeconds(150)
+            $nextSnapshot = [DateTime]::UtcNow
+            $proof = $false
             while ([DateTime]::UtcNow -lt $deadline) {
-              if (Test-Path $logDir) {
-                foreach ($log in @(Get-ChildItem $logDir -Filter 'SyntexSetup-Error-*.log' -File)) {
-                  $text = Get-Content $log.FullName -Raw
-                  if ($text -match 'Dateigröße stimmt nicht mit dem Manifest überein') { $proof = $log; break }
-                }
+              if ($p.HasExited) { throw "Published setup exited unexpectedly, code $($p.ExitCode)." }
+              $allText = (@(Get-ProcessWindows ([uint32]$p.Id)) | ConvertTo-Json -Depth 6 -Compress)
+              if ($allText -match 'Dateigröße stimmt nicht mit dem Manifest überein') { $proof = $true; break }
+              if ([DateTime]::UtcNow -ge $nextSnapshot) {
+                Write-Snapshot ([uint32]$p.Id) $window 'INSTALLING'
+                $nextSnapshot = [DateTime]::UtcNow.AddSeconds(10)
               }
-              if ($null -ne $proof) { break }
               Start-Sleep -Milliseconds 500
             }
-            if ($null -eq $proof) {
-              Write-Host "SETUP_FINAL buttonEnabled=$([SyntexSetupUi]::IsWindowEnabled($installButton)) status=$(Read-Text $statusText) targetExists=$(Test-Path $target)"
+            Write-Snapshot ([uint32]$p.Id) $window 'FINAL'
+            if (-not $proof) {
               if (Test-Path $target) { Get-ChildItem -LiteralPath $target -Force -Recurse | Select-Object -First 50 FullName,Length | Format-Table -AutoSize | Out-String | Write-Host }
               if (Test-Path $logDir) { Get-ChildItem $logDir -File | ForEach-Object { Write-Host "--- $($_.Name) ---"; Get-Content $_.FullName -Raw } }
-              throw 'Setup did not produce the expected stale-manifest size-mismatch failure.'
+              throw 'Setup did not expose the expected stale-manifest size-mismatch failure.'
             }
-            Write-Host "PUBLIC_0166_STALE_MANIFEST_BLOCKER_PROVEN log=$($proof.Name)"
+            Write-Host 'PUBLIC_0166_STALE_MANIFEST_BLOCKER_PROVEN'
           }
           finally {
             Get-Process SyntexLauncher* -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
