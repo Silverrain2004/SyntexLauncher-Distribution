@@ -1,0 +1,55 @@
+name: Syntex 0.16.7 Private Launcher Build Bridge
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ['feat/0.16.7-self-update']
+    paths:
+      - '.github/workflows/0167-private-launcher-build-bridge.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  build-private-managed-launcher:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout private PR32 source
+        uses: actions/checkout@v4
+        with:
+          repository: Silverrain2004/SyntexLauncher
+          ref: fix/0.16.6-startup-and-layout
+          token: ${{ github.token }}
+          path: private-src
+          persist-credentials: false
+      - name: Setup .NET 10
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.400'
+      - name: Publish managed launcher win-x64
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          Set-Location .\private-src
+          dotnet restore .\SyntexLauncher.sln --locked-mode
+          if($LASTEXITCODE -ne 0){throw "Restore failed: $LASTEXITCODE"}
+          $out=Join-Path $env:RUNNER_TEMP 'managed-launcher-pr32'
+          dotnet publish .\src\Syntex.Launcher\Syntex.Launcher.csproj -c Release -r win-x64 --self-contained true --no-restore -o $out
+          if($LASTEXITCODE -ne 0){throw "Publish failed: $LASTEXITCODE"}
+          $exe=Join-Path $out 'SyntexLauncher.App.exe'
+          if(-not (Test-Path $exe)){
+            $exe=Get-ChildItem $out -Filter '*.exe' | Where-Object Name -Match 'SyntexLauncher' | Select-Object -First 1 -ExpandProperty FullName
+          }
+          if(-not $exe -or -not (Test-Path $exe)){throw 'Managed launcher executable missing.'}
+          $sha=(Get-FileHash $exe -Algorithm SHA256).Hash.ToLowerInvariant()
+          $size=(Get-Item $exe).Length
+          Write-Host "PR32_MANAGED_LAUNCHER_SIZE=$size"
+          Write-Host "PR32_MANAGED_LAUNCHER_SHA256=$sha"
+      - name: Upload managed launcher binary package
+        uses: actions/upload-artifact@v4
+        with:
+          name: pr32-managed-launcher-win-x64
+          path: ${{ runner.temp }}/managed-launcher-pr32/
+          if-no-files-found: error
+          retention-days: 1
